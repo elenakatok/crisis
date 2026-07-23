@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /game_instances/{instanceId}/participants/{participantId} {
+      // Students can read their own record.
+      allow read: if request.auth != null && request.auth.uid == participantId;
+
+      // Students can update their own display_name and any prep answer field.
+      // Uses a blocklist rather than an allowlist so the question editor can
+      // introduce new field names (e.g. prep_abc123) without a rules redeploy.
+      // Protected fields (role, scores, group assignment, timestamps, bot flag) may
+      // not be touched by a direct client write; create and delete remain denied.
+      allow update: if request.auth != null
+        && request.auth.uid == participantId
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['role', 'group_id', 'raw_score', 'normalized_score',
+                      'knowledge_check_score', 'knowledge_check_attempts',
+                      'prep_status', 'prep_completed_at', 'debrief_initial_offer',
+                      'finalized_at', 'attendance_confirmed_at', 'confirmed_ready_at',
+                      'is_lead', 'is_bot', 'participant_id', 'game_instance_id',
+                      'participant_late', 'value_or_cost']);
+    }
+
+    // role_counts is an internal balancing counter — backend only.
+    match /game_instances/{instanceId}/role_counts/{doc} {
+      allow read, write: if false;
+    }
+
+    // Game config (PDF URLs, round clock, etc.) is backend-only.
+    // Clients get only their role's private URL via the getInfoUrls Cloud Function.
+    match /game_instances/{instanceId}/config/{doc} {
+      allow read, write: if false;
+    }
+
+    // Groups are written by the Cloud Function; any authenticated participant can
+    // read them. Crisis has NO private information (§1.1) — the full history of
+    // bids, allocations, fix decisions, and profits is common knowledge — so group
+    // state (and its future per-round subcollections) is deliberately readable by
+    // every group member. Writes are server-only (admin SDK bypasses rules).
+    match /game_instances/{instanceId}/groups/{groupId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /game_instances/{instanceId}/groups/{groupId}/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Default deny for everything else.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "crisis",
+  "version": "1.0.0",
+  "description": "Crisis — a 10-round, 3-player repeated stage game (participation-only scoring).",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elenakatok/crisis.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/elenakatok/crisis/issues"
+  },
+  "homepage": "https://github.com/elenakatok/crisis#readme",
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
