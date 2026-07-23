@@ -65,6 +65,18 @@ export const getInfoUrls                        = makeGetInfoUrls(crisisGameDef)
 export { getReportData } from './getReportData'
 export { scoreAndRecord } from './scoreAndRecord'
 
+// ── Slice 2: the round loop + clock (server-authoritative Firestore shell over the
+// pure Slice-1 machine). The SAME callable names the Slice-3 student UI will invoke.
+export {
+  openRound,
+  submitBid,
+  submitAllocation,
+  submitFix,
+  checkRoundClock,
+  getRoundView,
+  getInstructorRoundView,
+} from './crisisRound'
+
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
 
 const CORS_ORIGINS = new Set(['https://crisis.mygames.live'])
@@ -79,3 +91,6 @@ export const health = onRequest((req, res) => {
   if (req.method === 'OPTIONS') { res.status(204).send(''); return }
   res.json({ ok: true, game: 'crisis' })
 })
+
+// Emulator-only dev seed (LOCKED — 404 unless FUNCTIONS_EMULATOR==='true').
+export { seedGroupForTest } from './seedFunctions'
