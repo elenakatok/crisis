@@ -88,6 +88,61 @@ export const submitKnowledgeCheck = (data: object = {}) =>
 export const submitStaticKnowledgeCheckQuestion = (data: object = {}) =>
   callFn<{ ok: boolean; correct?: boolean }>('submitStaticKnowledgeCheckQuestion', data)
 
+// ── Round-loop API (Slice 2 callables — the SAME names the Slice-3 UI invokes) ──
+
+export type Stage = 'bidding' | 'allocation' | 'fixing'
+export type Role = 'buyer' | 'seller1' | 'seller2'
+
+/** One completed round — the shared history table row (everyone sees it, §1.1). */
+export type RoundRecord = {
+  round: number
+  buyerSeat: number
+  seller1Seat: number
+  seller2Seat: number
+  bids: { s1: number; s2: number }
+  allocation: { a1: number; a2: number }
+  crisisOccurred: boolean
+  fixed: { s1: boolean; s2: boolean }
+  profits: { seller1: number; seller2: number; buyer: number }
+  defaulted: { s1: boolean; s2: boolean; buyer: boolean }
+}
+
+/** The per-seat view getRoundView returns — this is ALSO the exact object exposed to the
+ *  page for the Slice-5 robot driver (window.__crisisState). */
+export type SeatView = {
+  ok: boolean
+  seat: number
+  role: Role
+  status: 'in_progress' | 'finished'
+  round: number
+  numRounds: number
+  stage: Stage
+  owes: 'bid' | 'allocation' | 'fix' | null
+  currentBids: { s1: number; s2: number } | null
+  currentAllocation: { a1: number; a2: number } | null
+  crisisOccurred: boolean | null
+  history: RoundRecord[]
+  pendingCount: number
+  clockEnabled: boolean
+  /** ms epoch of the current stage deadline, or null when the clock is off (online play). */
+  stageDeadlineMs: number | null
+}
+
+export const getRoundView = (groupId: string) =>
+  callFn<SeatView>('getRoundView', { group_id: groupId })
+
+export const submitBid = (groupId: string, bid: number) =>
+  callFn<{ ok: boolean; reason?: string }>('submitBid', { group_id: groupId, bid })
+
+export const submitAllocation = (groupId: string, a1: number, a2: number) =>
+  callFn<{ ok: boolean; reason?: string }>('submitAllocation', { group_id: groupId, a1, a2 })
+
+export const submitFix = (groupId: string, fixed: boolean) =>
+  callFn<{ ok: boolean; reason?: string }>('submitFix', { group_id: groupId, fixed })
+
+export const checkRoundClock = (groupId: string) =>
+  callFn<{ ok: boolean; closed?: boolean }>('checkRoundClock', { group_id: groupId })
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

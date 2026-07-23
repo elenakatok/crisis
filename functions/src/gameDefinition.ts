@@ -144,6 +144,11 @@ export const crisisGameDef: GameDefinition = {
     { key: 'player_sheet_url', kind: 'url',          default: '/role-info/crisis.pdf' },
     { key: 'round_seconds',    kind: 'positiveInt',  default: 120 },
     { key: 'num_rounds',       kind: 'positiveInt',  default: 10 },
+    // Clock is CLASSROOM-ONLY, a per-instance setting (decision 2026-07-23, §3.1):
+    // 'on' (classroom — stages time out to the default table) or 'off' (online play —
+    // stages close only when every required seat acts, no clock, no UI). ConfigFieldDef
+    // has no boolean kind, so this is a small 'on'/'off' string (no shared change).
+    { key: 'clock_mode',       kind: 'string',       default: 'on' },
   ],
 
   // Info page links — keys must appear in configFields above.

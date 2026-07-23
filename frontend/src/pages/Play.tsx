@@ -16,6 +16,7 @@ import {
   spacing,
 } from '@mygames/game-ui'
 import type { BootstrapArgs, InfoPageLink } from '@mygames/game-ui'
+import CrisisGame from '../game/CrisisGame'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 //
@@ -328,17 +329,9 @@ export default function Play() {
       )}
 
       {phase.name === 'matched' && (
-        <main data-testid="crisis-room" style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
-          <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
-          <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
-            You&apos;ve been placed with two other players. Your role — Buyer or Seller —
-            will be assigned when the game begins.
-          </p>
-          <p style={{ color: colors.textSecondary }}>
-            Keep this tab open. The round-by-round game screens open here in a later
-            release.
-          </p>
-        </main>
+        <div data-testid="crisis-room">
+          <CrisisGame participantId={participantId} gameInstanceId={gameInstanceId} groupId={phase.groupId} />
+        </div>
       )}
     </div>
   )

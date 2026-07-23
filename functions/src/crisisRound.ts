@@ -72,17 +72,26 @@ interface StoredDoc {
   pid_by_seat: Record<string, string>
   seat_by_pid: Record<string, number>
   stage_seconds: number
-  stage_deadline_ms: number
+  /** Clock ON (classroom) vs OFF (online). OFF → no deadline, stages never time out. */
+  clock_enabled: boolean
+  /** null when the clock is off (online play) — the UI renders no clock at all. */
+  stage_deadline_ms: number | null
+}
+
+/** A fresh stage deadline, or null when the clock is off. */
+function nextDeadline(stored: StoredDoc, clockNowMs: number): number | null {
+  return stored.clock_enabled ? clockNowMs + stored.stage_seconds * 1000 : null
 }
 
 /** Full stored payload for a wholesale (no-merge) write. */
-function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: number) {
+function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: number | null) {
   return {
     state: newState,
     group_id: stored.group_id,
     pid_by_seat: stored.pid_by_seat,
     seat_by_pid: stored.seat_by_pid,
     stage_seconds: stored.stage_seconds,
+    clock_enabled: stored.clock_enabled,
     stage_deadline_ms: deadlineMs,
     updated_at: FieldValue.serverTimestamp(),
   }
@@ -107,6 +116,7 @@ export const openRound = onCall(CORS, async (request) => {
   const cfg = (configSnap.data() ?? {}) as Record<string, unknown>
   const numRounds = Number(cfg['num_rounds'] ?? NUM_ROUNDS_DEFAULT) || NUM_ROUNDS_DEFAULT
   const stageSeconds = Number(cfg['round_seconds'] ?? STAGE_SECONDS_DEFAULT) || STAGE_SECONDS_DEFAULT
+  const clockEnabled = (cfg['clock_mode'] ?? 'on') !== 'off'
 
   // Seat = array position (0..2). Roles are assigned LATE inside openRoundState (§2).
   const pidBySeat: Record<string, string> = {}
@@ -123,10 +133,11 @@ export const openRound = onCall(CORS, async (request) => {
     pid_by_seat: pidBySeat,
     seat_by_pid: seatByPid,
     stage_seconds: stageSeconds,
-    stage_deadline_ms: nowMs(data) + stageSeconds * 1000,
+    clock_enabled: clockEnabled,
+    stage_deadline_ms: clockEnabled ? nowMs(data) + stageSeconds * 1000 : null,
     updated_at: FieldValue.serverTimestamp(),
   })
-  return { ok: true as const, round: state.round, stage: state.stage }
+  return { ok: true as const, round: state.round, stage: state.stage, clockEnabled }
 })
 
 // ── the auth-free action core (BOT SEAM #1 — shared by human callables AND, in Slice 5,
@@ -156,8 +167,8 @@ export async function applySeatAction(
     const result = applyAction(stored.state, seat, action, DEFAULT_CRISIS_SETTINGS)
     if (!result.ok) return { ok: false as const, reason: result.reason }
 
-    // A new stage/round opened → fresh deadline; else keep the running one.
-    const deadline = result.stageClosed ? clockNowMs + stored.stage_seconds * 1000 : stored.stage_deadline_ms
+    // A new stage/round opened → fresh deadline; else keep the running one. (null when clock off.)
+    const deadline = result.stageClosed ? nextDeadline(stored, clockNowMs) : stored.stage_deadline_ms
     tx.set(ref, storedPayload(stored, result.state, deadline))
 
     // Groups lock at first submission (§6): stamp the group doc once round-1 play begins.
@@ -214,10 +225,12 @@ async function tickClock(iid: string, groupId: string, clockNowMs: number) {
     if (!snap.exists) return { ok: true as const, closed: false, reason: 'not_started' }
     const stored = snap.data() as StoredDoc
     if (stored.state.status !== 'in_progress') return { ok: true as const, closed: false, reason: 'finished' }
+    // Clock OFF (online play) → stages never time out; only real actions close them.
+    if (!stored.clock_enabled || stored.stage_deadline_ms === null) return { ok: true as const, closed: false, reason: 'clock_off' }
     if (clockNowMs < stored.stage_deadline_ms) return { ok: true as const, closed: false, reason: 'not_expired' }
 
     const result = expireStage(stored.state, DEFAULT_CRISIS_SETTINGS)
-    const deadline = clockNowMs + stored.stage_seconds * 1000
+    const deadline = nextDeadline(stored, clockNowMs)
     tx.set(ref, storedPayload(stored, result.state, deadline))
     if (result.finished) writeEndOutcomes(tx, instanceRef, stored, result.state)
     return { ok: true as const, closed: result.stageClosed, finished: result.finished, round: result.state.round, stage: result.state.stage }
@@ -255,7 +268,12 @@ export const getRoundView = onCall(CORS, async (request) => {
   const seat = stored.seat_by_pid[participantId]
   if (seat === undefined) throw new HttpsError('permission-denied', 'You are not in this group.')
 
-  return { ok: true as const, ...buildSeatView(stored.state, seat), stageDeadlineMs: stored.stage_deadline_ms }
+  return {
+    ok: true as const,
+    ...buildSeatView(stored.state, seat),
+    clockEnabled: stored.clock_enabled,
+    stageDeadlineMs: stored.clock_enabled ? stored.stage_deadline_ms : null,
+  }
 })
 
 // ── getInstructorRoundView (instructor): all seats + roles + timeouts (dashboard/harness) ─
@@ -281,7 +299,8 @@ export const getInstructorRoundView = onCall(CORS, async (request) => {
     seats,
     pendingSeats: st.status === 'in_progress' ? requiredSeats(st).filter((s) => buildSeatView(st, s).owes !== null) : [],
     history: st.history,
-    stageDeadlineMs: stored.stage_deadline_ms,
+    clockEnabled: stored.clock_enabled,
+    stageDeadlineMs: stored.clock_enabled ? stored.stage_deadline_ms : null,
   }
 })
 

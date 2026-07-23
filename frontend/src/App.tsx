@@ -27,6 +27,7 @@ const crisisConfigSections = [
     fields: [
       { key: 'round_seconds', label: 'Seconds per decision (round clock)', kind: 'positiveInt' as const, placeholder: '120' },
       { key: 'num_rounds',    label: 'Number of rounds',                   kind: 'positiveInt' as const, placeholder: '10' },
+      { key: 'clock_mode',    label: 'Clock: "on" (classroom) or "off" (online play)', kind: 'string' as const, placeholder: 'on' },
     ],
   },
 ]
