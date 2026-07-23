@@ -66,6 +66,30 @@ const alloc  = (gid, pid, a1, a2, now) => callFn('submitAllocation', asStudent(g
 const fix    = (gid, pid, f, now) => callFn('submitFix', asStudent(gid, pid, { group_id: 'g', fixed: f, ...(now != null ? { _dev: { participant_id: pid, game_instance_id: gid, now_ms: now } } : {}) }))
 const tick   = (gid, now) => callFn('checkRoundClock', asDev(gid, { group_id: 'g', _dev: { game_instance_id: gid, now_ms: now } }))
 
+// ── Slice 4 dashboard helpers (the SAME callable the live panel invokes) ──────────
+const dash = (gid) => callFn('getCrisisDashboard', asDev(gid, {}))
+const groupN = (d, n) => d.groups.find(g => g.groupNumber === n)
+
+function encVal(v) {
+  if (typeof v === 'boolean') return { booleanValue: v }
+  if (typeof v === 'string')  return { stringValue: v }
+  if (typeof v === 'number')  return { integerValue: String(v) }
+  throw new Error('encVal')
+}
+async function fsWrite(gid, suffix, obj) {
+  const fields = {}; for (const [k, v] of Object.entries(obj)) fields[k] = encVal(v)
+  await fetch(`${FIRESTORE}/game_instances/${gid}/${suffix}`, { method: 'PATCH', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) })
+}
+
+// group-parameterized variants (multi-group instances)
+const seedG   = (gid, groupId, pids) => fetch(`${FUNCTIONS}/seedGroupForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, group_id: groupId, player_participants: pids }) })
+const openG   = (gid, groupId, seed) => callFn('openRound', { _dev: { game_instance_id: gid, seed }, group_id: groupId })
+const iviewG  = (gid, groupId) => callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: groupId })
+const bidG    = (gid, groupId, pid, amt) => callFn('submitBid', { _test: { participant_id: pid, game_instance_id: gid }, group_id: groupId, bid: amt })
+const allocG  = (gid, groupId, pid, a1, a2) => callFn('submitAllocation', { _test: { participant_id: pid, game_instance_id: gid }, group_id: groupId, a1, a2 })
+const fixG    = (gid, groupId, pid, f) => callFn('submitFix', { _test: { participant_id: pid, game_instance_id: gid }, group_id: groupId, fixed: f })
+async function roleMapG(gid, groupId) { const v = (await iviewG(gid, groupId)).result; const m = {}; for (const s of v.seats) m[s.role] = s.participantId; return m }
+
 /** role → pid, read from the instructor view after open (roles assigned late). */
 async function roleMap(gid) {
   const v = (await iview(gid)).result
@@ -300,6 +324,104 @@ async function main() {
     check((await sview(gid2, rm2.buyer)).result.currentBids === null, 'bids hidden mid-bidding (sealed)')
     await bid(gid2, rm2.seller2, 22)
     check((await sview(gid2, rm2.buyer)).result.currentBids != null, 'bids revealed once bidding closes')
+  }
+
+  // ══ SLICE 4 — the instructor dashboard WINDOW (getCrisisDashboard, §4A) ══════════
+
+  // (D1) mid-stage: dashboard names the correct waiting seat, and it CHANGES as players act
+  banner('(D1) dashboard names the waiting seat, and it changes as players act')
+  {
+    const gid = 'dash-wait'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    let g = groupN((await dash(gid)).result, 1)
+    check(g.stage === 'bidding' && g.waitingOn.length === 2, '(D1) bidding → waiting on BOTH sellers')
+    check(g.waitingOn.every(w => w.role === 'seller1' || w.role === 'seller2'), '(D1) waiting seats are the two sellers, named')
+    await bid(gid, rm.seller1, 15)
+    g = groupN((await dash(gid)).result, 1)
+    check(g.waitingOn.length === 1 && g.waitingOn[0].role === 'seller2', '(D1) after seller1 bids → waiting on seller2 only')
+    await bid(gid, rm.seller2, 18)
+    g = groupN((await dash(gid)).result, 1)
+    check(g.stage === 'allocation' && g.waitingOn.length === 1 && g.waitingOn[0].role === 'buyer', '(D1) allocation stage → waiting on the buyer')
+  }
+
+  // (D2) different groups on different rounds render correctly
+  banner('(D2) two groups on different rounds')
+  {
+    const gid = 'dash-multi'
+    await seedG(gid, 'gA', ['a1', 'a2', 'a3']); await seedG(gid, 'gB', ['b1', 'b2', 'b3'])
+    await openG(gid, 'gA', 1); await openG(gid, 'gB', 1)
+    // advance gA into round 2 (no crisis path or crisis path — drive generically)
+    const rmA = await roleMapG(gid, 'gA')
+    await bidG(gid, 'gA', rmA.seller1, 15); await bidG(gid, 'gA', rmA.seller2, 15)
+    await allocG(gid, 'gA', rmA.buyer, 50, 50)
+    let vA = (await iviewG(gid, 'gA')).result
+    if (vA.stage === 'fixing') { for (const s of vA.pendingSeats) await fixG(gid, 'gA', (await roleMapG(gid, 'gA'))[vA.seats.find(x => x.seat === s).role], true) }
+    const d = (await dash(gid)).result
+    const gA = d.groups.find(x => x.groupId === 'gA'), gB = d.groups.find(x => x.groupId === 'gB')
+    check(gA.round === 2 && gB.round === 1, '(D2) group A on round 2, group B on round 1')
+    check(d.groups.length === 2, '(D2) both groups listed')
+  }
+
+  // (D3) a 0-unit seller is NOT shown as waited-on during the fix stage
+  banner('(D3) 0-unit seller not shown as waited-on in fix')
+  {
+    // find a crisis seed
+    let seed = null
+    for (let s = 1; s < 400 && seed === null; s++) {
+      const g = `dp-${s}`; await seedGroup(g, PIDS); await open(g, s)
+      const rm = await roleMap(g); await bid(g, rm.seller1, 15); await bid(g, rm.seller2, 15); await alloc(g, rm.buyer, 50, 50)
+      if ((await iview(g)).result.stage === 'fixing') seed = s
+    }
+    const gid = 'dash-zero'; await seedGroup(gid, PIDS); await open(gid, seed)
+    const rm = await roleMap(gid)
+    await bid(gid, rm.seller1, 15); await bid(gid, rm.seller2, 22); await alloc(gid, rm.buyer, 100, 0)
+    const g = groupN((await dash(gid)).result, 1)
+    check(g.stage === 'fixing', '(D3) group in fix stage')
+    check(g.waitingOn.length === 1 && g.waitingOn[0].role === 'seller1', '(D3) waiting on ONLY the seller with units (0-unit seller excluded)')
+  }
+
+  // (D4) timeout counts render per participant
+  banner('(D4) timeout counts render per participant')
+  {
+    const gid = 'dash-to'; await seedGroup(gid, PIDS); await open(gid, 1)
+    await tick(gid, tickNow()) // both sellers time out bidding
+    const g = groupN((await dash(gid)).result, 1)
+    const sellers = g.seats.filter(s => s.role !== 'buyer')
+    check(sellers.every(s => s.timeoutCount === 1), '(D4) each seller shows timeoutCount 1')
+    check(sellers[0].timeouts[0].stage === 'bidding' && typeof sellers[0].timeouts[0].round === 'number', '(D4) timeout carries round + stage (§3.3), not a boolean')
+  }
+
+  // (D5) clock ON renders a deadline; clock OFF renders none
+  banner('(D5) clock ON vs OFF on the dashboard')
+  {
+    const gOn = 'dash-on'; await seedGroup(gOn, PIDS); await open(gOn, 1)
+    let g = groupN((await dash(gOn)).result, 1)
+    check(g.clockEnabled === true && typeof g.stageDeadlineMs === 'number', '(D5) clock ON → deadline present')
+    const gOff = 'dash-off'; await seedGroup(gOff, PIDS); await fsWrite(gOff, 'config/main', { clock_mode: 'off' }); await open(gOff, 1)
+    g = groupN((await dash(gOff)).result, 1)
+    check(g.clockEnabled === false && g.stageDeadlineMs === null, '(D5) clock OFF → no deadline (null)')
+  }
+
+  // (D6) a finished group renders as finished
+  banner('(D6) finished group')
+  {
+    const gid = 'dash-fin'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    for (let r = 1; r <= 10; r++) await playRound(gid, rm, { b1: 15, b2: 18, a1: 60, a2: 40, f1: true, f2: false })
+    const g = groupN((await dash(gid)).result, 1)
+    check(g.status === 'finished', '(D6) dashboard shows the group finished')
+  }
+
+  // (D7) BOT FILTER in place ahead of Slice 5 — an is_bot seat is hidden
+  banner('(D7) bot filter (ahead of Slice 5): is_bot seat hidden from the dashboard')
+  {
+    const gid = 'dash-bot'; await seedGroup(gid, PIDS)
+    await fsWrite(gid, 'participants/pb', { is_bot: true }) // mark one seat a bot
+    await open(gid, 1)
+    const g = groupN((await dash(gid)).result, 1)
+    check(g.seats.length === 2, '(D7) bot seat filtered out — only 2 seats shown (of 3)')
+    check(!g.seats.some(s => s.participantId === 'pb'), '(D7) the bot participant is absent from seat rows')
+    check(g.waitingOn.length <= 2 && g.waitingOn.every(w => w.role !== null), '(D7) waitingOn is drawn only from the shown (non-bot) seats')
   }
 
   console.log('\n' + '═'.repeat(72))

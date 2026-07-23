@@ -3,6 +3,7 @@ import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, t
 import { auth, functions, rtdb } from '../firebase'
 import { submitInstructorOutcome } from '../api'
 import { crisisConfig } from '../gameConfig'
+import CrisisLivePanel from './CrisisLivePanel'
 
 // ── Role labels from game config (SINGLE matching role — `player`) ─────────────
 
@@ -67,7 +68,12 @@ function CrisisManualOutcomeControl({ submitting, error, onSubmit }: DeadlockRes
 
 export default function InstructorDashboard() {
   return (
-    <SharedDashboard
+    <>
+      {/* §4A live WINDOW (Crisis-specific), above the shared roster/match/score dashboard. */}
+      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 1rem' }}>
+        <CrisisLivePanel />
+      </div>
+      <SharedDashboard
       title="Instructor Dashboard — Crisis"
       roleLabels={roleLabels}
       DeadlockResolutionControl={CrisisManualOutcomeControl}
@@ -79,5 +85,6 @@ export default function InstructorDashboard() {
       reportsRoute="/reports"
       scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
     />
+    </>
   )
 }

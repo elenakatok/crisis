@@ -304,6 +304,83 @@ export const getInstructorRoundView = onCall(CORS, async (request) => {
   }
 })
 
+// ── getCrisisDashboard (instructor): the §4A live WINDOW over EVERY group ─────────
+// A read-only overview — NO controls. For each group it answers Elena's question
+// ("who is holding things up?"): the current round, the current stage, and WHICH SEAT
+// the stage is waiting on (that data already exists — it is the stage-close condition).
+// Plus timeout counts (§3.3) and whether a crisis occurred this round.
+//
+// BOTS ARE FILTERED OUT (§5.3): a participant with is_bot:true is removed from the seat
+// rows AND from waitingOn, even though it is a real seat in the group and round record.
+// Built now, ahead of Slice 5, so the filter never has to be retrofitted onto a live path.
+export const getCrisisDashboard = onCall(CORS, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const iid = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
+  const instanceRef = admin.firestore().collection('game_instances').doc(iid)
+
+  const [groupsSnap, roundsSnap, participantsSnap] = await Promise.all([
+    instanceRef.collection('groups').get(),
+    instanceRef.collection('crisis_round').get(),
+    instanceRef.collection('participants').get(),
+  ])
+
+  // participant → { name, isBot }
+  const meta = new Map<string, { name: string; isBot: boolean }>()
+  for (const p of participantsSnap.docs) {
+    const d = p.data() as Record<string, unknown>
+    const name = (((d['display_name'] ?? d['name'] ?? '') as string).trim()) || `${p.id.slice(0, 6)}…`
+    meta.set(p.id, { name, isBot: d['is_bot'] === true })
+  }
+
+  const roundByGroup = new Map<string, StoredDoc>()
+  for (const r of roundsSnap.docs) roundByGroup.set(r.id, r.data() as StoredDoc)
+
+  // Stable group numbers by sorted group_id (matches getReportData).
+  const sortedGroupIds = groupsSnap.docs.map(g => g.id).sort((a, b) => a.localeCompare(b))
+  const groupNumber = new Map(sortedGroupIds.map((id, i) => [id, i + 1]))
+
+  const groups = groupsSnap.docs.map((gdoc) => {
+    const gid = gdoc.id
+    const gStatus = (gdoc.data()['status'] as string | undefined) ?? 'matched'
+    const stored = roundByGroup.get(gid)
+
+    if (!stored) {
+      // Matched but the round loop hasn't been opened — a startable (launcher) group.
+      return {
+        groupId: gid, groupNumber: groupNumber.get(gid) ?? null,
+        status: 'not_started' as const, startable: gStatus === 'matched',
+        round: null, numRounds: null, stage: null, crisisOccurred: null,
+        clockEnabled: null, stageDeadlineMs: null, seats: [], waitingOn: [],
+      }
+    }
+
+    const st = stored.state
+    // Seat rows — BOTS FILTERED OUT (§5.3).
+    const seats = [0, 1, 2].map((seat) => {
+      const pid = stored.pid_by_seat[String(seat)]
+      const m = pid ? meta.get(pid) : undefined
+      const timeouts = st.timeouts[seat] ?? []
+      const waiting = st.status === 'in_progress' && buildSeatView(st, seat).owes !== null
+      return { seat, role: roleOfSeat(st, seat), participantId: pid ?? null, name: m?.name ?? null, isBot: m?.isBot ?? false, timeoutCount: timeouts.length, timeouts, waiting }
+    }).filter(s => !s.isBot)
+
+    // "Who is holding it up" — pending HUMAN seats only.
+    const waitingOn = seats.filter(s => s.waiting).map(s => ({ role: s.role, name: s.name }))
+
+    return {
+      groupId: gid, groupNumber: groupNumber.get(gid) ?? null,
+      status: st.status, startable: false,
+      round: st.round, numRounds: st.numRounds, stage: st.stage,
+      crisisOccurred: st.crisisOccurred,
+      clockEnabled: stored.clock_enabled,
+      stageDeadlineMs: stored.clock_enabled ? stored.stage_deadline_ms : null,
+      seats, waitingOn,
+    }
+  }).sort((a, b) => (a.groupNumber ?? Infinity) - (b.groupNumber ?? Infinity))
+
+  return { ok: true as const, groups }
+})
+
 // ── on FINISH: denormalize participation metadata + mark the group completed ──────
 // Scoring is participation-only (spec §4), so the group outcome is a placeholder; the
 // generic finalize / scoreAndRecord path just needs a completed group with an outcome.

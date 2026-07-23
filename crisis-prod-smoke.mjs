@@ -94,16 +94,30 @@ async function main() {
   await sleep(8000) // let the waiting-room mount + presence register
   check(true, '3 student browsers open on crisis.mygames.live (presence registering)')
 
-  // 4. Match → forms a group of exactly 3 present players.
+  // 4. Match → forms a group of exactly 3 present players (prefer a fresh, un-started one).
   await fn('triggerMatching', { token })
   const roster = await fn('getRoster', { token })
-  const myGroup = (roster.groups ?? []).find(g => (g.participants_by_role?.player ?? []).length === 3)
+  const threes = (roster.groups ?? []).filter(g => (g.participants_by_role?.player ?? []).length === 3)
+  const myGroup = threes.find(g => g.status === 'matched') ?? threes[0]
   check(!!myGroup, `matching formed a group of 3 (group ${myGroup?.group_id})`)
-  if (!myGroup) throw new Error('No group of 3 formed — stale presence or too few present.')
+  if (!myGroup) throw new Error('No group of 3 formed — stale presence, too few present, or students already matched (use a FRESH instance).')
 
-  // 5. Start the round loop (no Slice-4 dashboard button yet → instructor callable directly).
+  // 5. Start the round loop via the Slice-4 launcher action (instructor openRound).
   const opened = await fn('openRound', { token, group_id: myGroup.group_id })
   check(opened?.ok, `openRound started the game (round ${opened?.round}, clock ${opened?.clockEnabled ? 'ON' : 'off'})`)
+
+  // 5b. SLICE 4 — the instructor dashboard WINDOW (§4A), mid-game.
+  banner('Slice 4 — instructor dashboard (live window)')
+  const dashData = await fn('getCrisisDashboard', { token })
+  const liveG = (dashData.groups ?? []).find(g => g.status === 'in_progress' && g.round === 1)
+  check(!!liveG && liveG.stage === 'bidding', 'dashboard: a group at round 1, bidding stage')
+  check(!!liveG && liveG.waitingOn.some(w => (w.role ?? '').startsWith('seller')), 'dashboard names a waiting SELLER (who is holding it up)')
+  check(!!liveG && liveG.seats.length === 3 && !liveG.seats.some(s => s.isBot), 'dashboard shows 3 human seats, no bots')
+  // the rendered panel actually mounts + polls in prod (instructor-authed)
+  const dashPage = await ctx.newPage()
+  await dashPage.goto(dashUrl, { waitUntil: 'domcontentloaded' })
+  await dashPage.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 30000 }).catch(() => {})
+  check(await dashPage.locator('[data-testid="crisis-live-panel"]').count() > 0, 'live dashboard panel renders in prod')
 
   // 6. The browsers transition waiting-room → matched → game. Wait for the exposed state.
   banner('Playing 10 rounds through the REAL prod UI')
@@ -124,6 +138,11 @@ async function main() {
   check(hists.every(h => h === hists[0]), 'history byte-identical across all three seats (§1.1)')
   const totals = await Promise.all(pages.map(p => p.textContent('[data-testid="crisis-total-profit"]').catch(() => null)))
   console.log(`  total profits shown: ${totals.join(' / ')}`)
+
+  // 7b. Dashboard now shows the group finished.
+  const dashData2 = await fn('getCrisisDashboard', { token })
+  check((dashData2.groups ?? []).some(g => g.status === 'finished'), 'dashboard shows a finished group after the playthrough')
+  await dashPage.close()
 
   // 8. Score & record → gradebook push (participation-only).
   const scored = await fn('scoreAndRecord', { token })

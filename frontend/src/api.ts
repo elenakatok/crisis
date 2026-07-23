@@ -143,6 +143,44 @@ export const submitFix = (groupId: string, fixed: boolean) =>
 export const checkRoundClock = (groupId: string) =>
   callFn<{ ok: boolean; closed?: boolean }>('checkRoundClock', { group_id: groupId })
 
+// ── Instructor round-loop API (Slice 4 dashboard) ──────────────────────────────
+
+/** One seat on the live dashboard — BOTS are already filtered out server-side (§5.3). */
+export type DashboardSeat = {
+  seat: number
+  role: Role | null
+  participantId: string | null
+  name: string | null
+  isBot: boolean
+  timeoutCount: number
+  timeouts: { round: number; stage: Stage }[]
+  waiting: boolean
+}
+
+export type DashboardGroup = {
+  groupId: string
+  groupNumber: number | null
+  status: 'not_started' | 'in_progress' | 'finished'
+  startable: boolean
+  round: number | null
+  numRounds: number | null
+  stage: Stage | null
+  crisisOccurred: boolean | null
+  clockEnabled: boolean | null
+  stageDeadlineMs: number | null
+  seats: DashboardSeat[]
+  /** The pending HUMAN seats — "who is holding it up" (§4A). */
+  waitingOn: { role: Role | null; name: string | null }[]
+}
+
+/** The §4A live window over every group. Read-only — no controls. */
+export const getCrisisDashboard = () =>
+  callFn<{ ok: boolean; groups: DashboardGroup[] }>('getCrisisDashboard', {})
+
+/** Launcher action (instructor is "a launcher and a finalizer"): start the round loop for a group. */
+export const openRound = (groupId: string) =>
+  callFn<{ ok: boolean; round: number; stage: Stage; clockEnabled: boolean }>('openRound', { group_id: groupId })
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

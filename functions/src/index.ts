@@ -75,6 +75,7 @@ export {
   checkRoundClock,
   getRoundView,
   getInstructorRoundView,
+  getCrisisDashboard,
 } from './crisisRound'
 
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
