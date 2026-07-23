@@ -192,9 +192,11 @@ async function main() {
   const anyCrisisFixed = hist0.history.some(h => h.crisisOccurred && (h.fixed.s1 || h.fixed.s2))
   const anyCrisisUnfixed = hist0.history.some(h => h.crisisOccurred && ((h.allocation.a1 > 0 && !h.fixed.s1) || (h.allocation.a2 > 0 && !h.fixed.s2)))
   const anyNoCrisis = hist0.history.some(h => !h.crisisOccurred)
+  // Read the Fix cells directly (textContent concatenates cells, so match on substrings —
+  // "Yes"/"No" appear ONLY in Fix cells; the caption's "no crisis" is lowercase).
   const tableText = hists[0]
-  check(anyCrisisUnfixed && /\bNo\b/.test(tableText), '⚠ "No" renders in a Fix column (crisis NOT fixed — the untested path)')
-  check(anyCrisisFixed ? /\bYes\b/.test(tableText) : true, '"Yes" renders when a crisis was fixed')
+  check(anyCrisisUnfixed && /No/.test(tableText), '⚠ "No" renders in a Fix column (crisis NOT fixed — the untested path)')
+  check(anyCrisisFixed ? /Yes/.test(tableText) : true, '"Yes" renders when a crisis was fixed')
   check(anyNoCrisis ? /—/.test(tableText) : true, '"—" renders for a no-crisis round')
   const totals = await Promise.all(pages.map(p => p.page.textContent('[data-testid="crisis-total-profit"]').catch(() => null)))
   console.log(`  total profits shown: ${totals.join(' / ')}`)

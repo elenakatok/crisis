@@ -300,6 +300,26 @@ async function main() {
     await pOff.close()
   }
 
+  // (7) Fix column renders Yes / No / — all visibly distinct (deterministic: round-1 crisis
+  //     seed, seller1 fixes → "Yes", seller2 does not → "No", a later no-crisis round → "—")
+  banner('(7) Fix column: Yes / No / — all render')
+  {
+    const seed = await seedForCrisis(true) // round 1 is a crisis
+    const gid = 'ui-fixcol'; await seedGroup(gid, PIDS); await open(gid, seed)
+    const pages = []; for (const pid of PIDS) pages.push({ pid, page: await gotoSeat(ctx, gid, pid) })
+    const plan = { bid: () => 15, alloc: () => [50, 50], fix: (st) => st.role === 'seller1' } // s1 fixes, s2 never
+    await driveToFinish(pages, plan)
+    const hist = await pages[0].page.evaluate(() => window.__crisisState.history)
+    const dataYes = hist.some(h => h.crisisOccurred && h.fixed.s1)
+    const dataNo  = hist.some(h => h.crisisOccurred && !h.fixed.s2)
+    const dataDash = hist.some(h => !h.crisisOccurred)
+    const table = await pages[0].page.textContent('[data-testid="crisis-history"]')
+    check(dataYes && /Yes/.test(table), '(7) "Yes" renders for a fixed crisis')
+    check(dataNo && /No/.test(table), '(7) "No" renders for an unfixed crisis (the previously untested path)')
+    check(dataDash && /—/.test(table), '(7) "—" renders for a no-crisis round')
+    for (const p of pages) await p.page.close()
+  }
+
   await browser.close()
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
