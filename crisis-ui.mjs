@@ -320,26 +320,41 @@ async function main() {
     for (const p of pages) await p.page.close()
   }
 
-  // (8) dashboard restructure: live view is its OWN window (/live), NOT above the nav bar
-  banner('(8) live view moved to its own window; clock switch present')
+  // (8) SAA-uniform: summary panel at TOP of the dashboard (link, not button); /live same-window
+  banner('(8) SAA-uniform live view — top summary panel + same-window /live')
   {
     const gid = 'ui-live'; await seedGroup(gid, PIDS); await open(gid, 1)
-    // main dashboard: live panel GONE from here (was above the nav bar), open-live button present
+    // main dashboard: summary panel portaled to TOP; orange "Live view →" link; NO bottom button; panel not here
     const dash = await ctx.newPage()
     await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
-    await dash.waitForSelector('[data-testid="roster-table"]', { timeout: 30000 }).catch(() => {})
-    check(await testidPresent(dash, 'crisis-open-live'), '(8) main dashboard has an "Open live view" button')
-    check(!(await testidPresent(dash, 'crisis-live-panel')), '(8) live panel NO LONGER on the main dashboard (was above the nav bar)')
+    await dash.waitForSelector('[data-testid="crisis-live-summary"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(dash, 'crisis-live-summary'), '(8) summary panel present at the top of the dashboard')
+    check(await testidPresent(dash, 'crisis-live-nav'), '(8) inline "Live view →" link present (not a button)')
+    check(!(await testidPresent(dash, 'crisis-open-live')), '(8) old bottom "Open live view" button removed')
+    check(!(await testidPresent(dash, 'crisis-live-panel')), '(8) full live panel not on the main dashboard')
+    // the summary panel (inside its portal host) is the FIRST child of <main>, above the heading (like SAA)
+    const firstIsSummary = await dash.evaluate(() => {
+      const first = document.querySelector('main')?.firstElementChild
+      return !!first && first.querySelector('[data-testid="crisis-live-summary"]') !== null
+    })
+    check(firstIsSummary, '(8) summary panel is the first child of <main> (under buttons, above heading)')
     await dash.close()
-    // /live (its own window): the live panel + the clock switch render
+    // /live (SAME window nav): back link + clock switch + panel
     const live = await ctx.newPage()
     await live.goto(`${FE}/live?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
     await live.waitForSelector('[data-testid="crisis-clock-switch"]', { timeout: 30000 }).catch(() => {})
-    check(await testidPresent(live, 'crisis-clock-switch'), '(8) /live has the clock switch (set before starting)')
-    await live.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 15000 }).catch(() => {})
-    check(await testidPresent(live, 'crisis-live-panel'), '(8) /live renders the §4A live panel in its own window')
-    // clock switch reflects config + is settable
-    check(await testidPresent(live, 'clock-on') && await testidPresent(live, 'clock-off'), '(8) clock switch shows ON/OFF choices')
+    check(await testidPresent(live, 'crisis-back-to-dashboard'), '(8) /live has an orange "← Back to dashboard" link')
+    check(await testidPresent(live, 'crisis-clock-switch'), '(8) /live has the clock switch')
+    check(await testidPresent(live, 'crisis-live-panel'), '(8) /live renders the §4A live panel')
+
+    // (8b) the clock switch PERSISTS — click OFF then ON, confirm each sticks via getGameConfig
+    await live.click('[data-testid="clock-off"]'); await sleep(1200)
+    let cfg = (await callFn('getGameConfig', { _dev: { game_instance_id: gid } })).result
+    check(cfg.clock_mode === 'off', '(8b) clicking OFF persists (updateGameConfig accepted clock_mode)')
+    await live.click('[data-testid="clock-on"]'); await sleep(1200)
+    cfg = (await callFn('getGameConfig', { _dev: { game_instance_id: gid } })).result
+    check(cfg.clock_mode === 'on', '(8b) clicking ON persists — both stick')
+    check(!(await live.locator('text=No recognised fields to update').count()), '(8b) NO "No recognised fields to update" error')
     await live.close()
   }
 

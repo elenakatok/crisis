@@ -50,9 +50,14 @@ export default function LiveView() {
     <div style={{ fontFamily: typography.fontFamily }}>
       <GameHeader />
       <main style={{ maxWidth: layout.maxWidth, margin: '0 auto', padding: `1.5rem ${layout.pagePad} 3rem` }}>
-        <h1 style={{ marginTop: 0, marginBottom: spacing.gapMd, fontSize: '1.25rem', fontWeight: 600 }}>Crisis — live view</h1>
-        {error && <p style={{ color: colors.deadlockText }}>{error}</p>}
-        {!ready && !error && <p style={{ color: colors.textSecondary }}>Setting up session…</p>}
+        {/* UNIFORM with SAA's live view: heading + top-right orange "← Back to dashboard"
+            (same window, href nav). */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: spacing.gapLg }}>
+          <h2 style={{ margin: 0 }}>Live view</h2>
+          <a data-testid="crisis-back-to-dashboard" href={`/dashboard${window.location.search}`} style={{ color: '#D38626', fontWeight: 600, fontSize: typography.sizeSm }}>← Back to dashboard</a>
+        </div>
+        {error && <p style={{ color: colors.errorText }}>{error}</p>}
+        {!ready && !error && <p style={{ color: colors.textSecondary }}>Loading…</p>}
         {ready && (
           <>
             <ClockSwitch />

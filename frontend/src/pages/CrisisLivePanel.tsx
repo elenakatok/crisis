@@ -54,7 +54,6 @@ export default function CrisisLivePanel() {
 
   return (
     <section data-testid="crisis-live-panel" style={{ margin: `${spacing.gapMd} 0`, fontFamily: typography.fontFamily }}>
-      <h2 style={{ fontSize: '1.05rem', margin: `0 0 ${spacing.gapSm}` }}>Live view</h2>
       <p style={{ ...label, marginTop: 0 }}>A window, not a control — it shows where each group is and who the stage is waiting on. (Bots are hidden.)</p>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.gapMd }}>
         {groups.map((g) => (
