@@ -181,6 +181,11 @@ export const getCrisisDashboard = () =>
 export const openRound = (groupId: string) =>
   callFn<{ ok: boolean; round: number; stage: Stage; clockEnabled: boolean }>('openRound', { group_id: groupId })
 
+// ── Clock-mode control (per-instance setting; instructor sets before starting) ──
+export type GameConfig = { ok: boolean; clock_mode?: string; round_seconds?: number; num_rounds?: number }
+export const getGameConfig = () => callFn<GameConfig>('getGameConfig', {})
+export const setClockMode = (mode: 'on' | 'off') => callFn<GameConfig>('updateGameConfig', { clock_mode: mode })
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

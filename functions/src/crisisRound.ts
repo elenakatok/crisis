@@ -522,18 +522,34 @@ function writeEndOutcomes(
   stored: StoredDoc,
   state: CrisisState,
 ) {
+  // Bots (§5.4) are in the group for all 10 rounds, so a HUMAN in a bot-filled group
+  // played every round against a bot — visible, never blocked (Elena judges the lesson).
+  const botSeats = new Set(stored.bot_seats ?? [])
+  const groupHasBots = botSeats.size > 0
   for (const [seatStr, pid] of Object.entries(stored.pid_by_seat)) {
     const seat = Number(seatStr)
+    if (botSeats.has(seat)) continue        // bots carry NO gradebook metadata (excluded downstream)
     const timeouts = state.timeouts[seat] ?? []
     const role = roleOfSeat(state, seat)
+    const roundsVsBot = groupHasBots ? state.numRounds : 0
+    // The `details` blob is what toGameResult forwards to the gradebook (metadata, NOT a
+    // score). §3.3: timeout is a COUNT PLUS the round numbers — never a boolean.
+    const details = {
+      crisis_role: role,
+      timeout_count: timeouts.length,
+      timeout_rounds: timeouts.map((t) => t.round),  // the round numbers → gradebook
+      timeout_events: timeouts,                       // {round, stage}[]
+      rounds_played: state.numRounds,
+      rounds_played_vs_bot: roundsVsBot,
+    }
     tx.set(instanceRef.collection('participants').doc(pid), {
       crisis_role: role,
       timeout_count: timeouts.length,
-      timeout_events: timeouts,               // {round, stage}[] — a count PLUS the rounds (§3.3)
+      timeout_events: timeouts,
       rounds_played: state.numRounds,
-      rounds_played_vs_bot: 0,                // Slice 5 (bots) will set this
+      rounds_played_vs_bot: roundsVsBot,
       total_profit: totalProfitForSeat(state, seat),
-      details: { crisis_role: role, timeout_count: timeouts.length, rounds_played: state.numRounds },
+      details,
     }, { merge: true })
   }
   tx.set(instanceRef.collection('groups').doc(stored.group_id), {

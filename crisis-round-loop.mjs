@@ -12,6 +12,7 @@
 import { openSync } from 'node:fs'
 import { spawn, execSync } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
+import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -117,6 +118,27 @@ async function driveMixedToFinish(gid, groupId, humanPlan = { bid: 15, a1: 50, a
   return (await iviewG(gid, groupId)).result
 }
 
+// ── mock classroom callback — captures the pushed GameResults (the gradebook payload) ──
+const CB_PORT = 5098
+let captured = []
+let cbServer = null
+function startCallback() {
+  return new Promise((res) => {
+    cbServer = http.createServer((req, r) => {
+      let b = ''; req.on('data', (c) => (b += c))
+      req.on('end', () => { try { captured.push(JSON.parse(b)) } catch { /* */ } ; r.writeHead(200, { 'Content-Type': 'application/json' }); r.end('{"ok":true}') })
+    })
+    cbServer.listen(CB_PORT, '127.0.0.1', res)
+  })
+}
+/** Run scoreAndRecord pushing to the mock callback; returns the captured GameResults. */
+async function scoreWithCapture(gid) {
+  captured = []
+  await callFn('scoreAndRecord', { _dev: { game_instance_id: gid, callback_url: `http://localhost:${CB_PORT}`, callback_secret: 'test' } })
+  await sleep(600) // let the per-record POSTs land
+  return captured
+}
+
 /** role → pid, read from the instructor view after open (roles assigned late). */
 async function roleMap(gid) {
   const v = (await iview(gid)).result
@@ -190,6 +212,7 @@ async function bringUp() {
   console.log('  Stack ready ✅')
 }
 function tearDown() {
+  if (cbServer) try { cbServer.close() } catch { /* */ }
   if (process.env.KEEP === '1') return
   for (const c of children) { try { process.kill(-c.pid, 'SIGKILL') } catch { /* */ } }
   freePorts()
@@ -198,6 +221,7 @@ function tearDown() {
 // ── the suite ───────────────────────────────────────────────────────────────────
 async function main() {
   await bringUp()
+  await startCallback()
 
   // (1) clean 10-round playthrough, 3 humans, no timeouts
   banner('(1) clean 10-round playthrough — 3 humans, no timeouts')
@@ -620,6 +644,60 @@ async function main() {
       if (b1.some(HIGH) && b1.some(LOW)) { found = { gid, b1 }; break }
     }
     check(!!found, '(B11) timeout-defaulted seller drew BOTH high and low across rounds — per-round redraw (not fixed)')
+  }
+
+  // ══ SLICE 6 — timeout recording → gradebook, rounds_played_vs_bot, clock switch ══
+
+  // (S1) timeout COUNT + ROUND NUMBERS reach the gradebook payload (§3.3, not a boolean)
+  banner('(S1) timeout round-numbers reach the gradebook payload')
+  {
+    const gid = 'grade-to'; await seedGroup(gid, PIDS); await open(gid, 1)
+    // time out the WHOLE game via the clock — every seat defaults every stage
+    let vt = tickNow()
+    for (let g = 0; g < 80; g++) { const v = (await iview(gid)).result; if (v.status === 'finished') break; await tick(gid, vt); vt += 200_000 }
+    const recs = await scoreWithCapture(gid)
+    const rec = recs.find(c => PIDS.includes(c.participant_id))
+    check(!!rec && typeof rec.details?.timeout_count === 'number' && rec.details.timeout_count > 0, '(S1) gradebook payload carries timeout_count > 0')
+    check(!!rec && Array.isArray(rec.details?.timeout_rounds) && rec.details.timeout_rounds.length > 0, '(S1) timeout_rounds carries the ROUND NUMBERS (not a boolean)')
+    check(!!rec && Array.isArray(rec.details?.timeout_events) && rec.details.timeout_events.every(e => typeof e.round === 'number' && typeof e.stage === 'string'), '(S1) timeout_events carries {round, stage}')
+    check(!!rec && rec.details?.rounds_played === 10, '(S1) rounds_played reaches the gradebook')
+    check(!!rec && rec.status === 'completed' && rec.normalized_score === 0, '(S1) participation-only: present → normalized 0 (NO automatic zero for timeouts)')
+  }
+
+  // (S2) rounds_played_vs_bot — visible for a bot-filled group, 0 for all-human (§5.4)
+  banner('(S2) rounds_played_vs_bot reaches the gradebook (bot-filled vs all-human)')
+  {
+    const gid = 'grade-bot'; await seedRoster(gid, ['solo']); const m = await match(gid); const groupId = m.result.remainder.group_id
+    await openG(gid, groupId, 1); await driveMixedToFinish(gid, groupId)
+    const recs = await scoreWithCapture(gid)
+    const rec = recs.find(c => c.participant_id === 'solo')
+    check(recs.length === 1, '(S2) bot-filled group → exactly the 1 human pushed (bots excluded)')
+    check(!!rec && rec.details?.rounds_played_vs_bot === 10, '(S2) bot-filled → rounds_played_vs_bot=10 (visible, never blocked)')
+
+    const gid2 = 'grade-human'; await seedGroup(gid2, PIDS); await open(gid2, 1); const rm = await roleMap(gid2)
+    for (let rd = 1; rd <= 10; rd++) await playRound(gid2, rm, { b1: 15, b2: 18, a1: 60, a2: 40, f1: true, f2: false })
+    const recs2 = await scoreWithCapture(gid2)
+    const rec2 = recs2.find(c => PIDS.includes(c.participant_id))
+    check(!!rec2 && rec2.details?.rounds_played_vs_bot === 0, '(S2) all-human group → rounds_played_vs_bot=0')
+  }
+
+  // (S3) clock switch — the SAME callables the ClockSwitch UI invokes (getGameConfig/updateGameConfig)
+  banner('(S3) clock switch ON/OFF settable + honoured at openRound')
+  {
+    const gid = 'clk-off'; await seedGroup(gid, PIDS)
+    await callFn('updateGameConfig', { _dev: { game_instance_id: gid }, clock_mode: 'off' })
+    const cfg = (await callFn('getGameConfig', { _dev: { game_instance_id: gid } })).result
+    check(cfg.clock_mode === 'off', '(S3) updateGameConfig set clock_mode=off; getGameConfig reads it back')
+    const oOff = await open(gid, 1)
+    check(oOff.result.clockEnabled === false, '(S3) OFF honoured at openRound (clockEnabled false)')
+    // and a stalled clock never fires when OFF
+    const t = await tick(gid, tickNow())
+    check(t.result?.closed === false && t.result?.reason === 'clock_off', '(S3) OFF → checkRoundClock never times out')
+
+    const gid2 = 'clk-on'; await seedGroup(gid2, PIDS)
+    await callFn('updateGameConfig', { _dev: { game_instance_id: gid2 }, clock_mode: 'on' })
+    const oOn = await open(gid2, 1)
+    check(oOn.result.clockEnabled === true, '(S3) ON honoured at openRound (clockEnabled true)')
   }
 
   console.log('\n' + '═'.repeat(72))

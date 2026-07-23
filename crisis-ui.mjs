@@ -320,6 +320,29 @@ async function main() {
     for (const p of pages) await p.page.close()
   }
 
+  // (8) dashboard restructure: live view is its OWN window (/live), NOT above the nav bar
+  banner('(8) live view moved to its own window; clock switch present')
+  {
+    const gid = 'ui-live'; await seedGroup(gid, PIDS); await open(gid, 1)
+    // main dashboard: live panel GONE from here (was above the nav bar), open-live button present
+    const dash = await ctx.newPage()
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="roster-table"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(dash, 'crisis-open-live'), '(8) main dashboard has an "Open live view" button')
+    check(!(await testidPresent(dash, 'crisis-live-panel')), '(8) live panel NO LONGER on the main dashboard (was above the nav bar)')
+    await dash.close()
+    // /live (its own window): the live panel + the clock switch render
+    const live = await ctx.newPage()
+    await live.goto(`${FE}/live?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await live.waitForSelector('[data-testid="crisis-clock-switch"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(live, 'crisis-clock-switch'), '(8) /live has the clock switch (set before starting)')
+    await live.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 15000 }).catch(() => {})
+    check(await testidPresent(live, 'crisis-live-panel'), '(8) /live renders the §4A live panel in its own window')
+    // clock switch reflects config + is settable
+    check(await testidPresent(live, 'clock-on') && await testidPresent(live, 'clock-off'), '(8) clock switch shows ON/OFF choices')
+    await live.close()
+  }
+
   await browser.close()
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)

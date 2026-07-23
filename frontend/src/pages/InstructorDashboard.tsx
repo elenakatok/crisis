@@ -3,7 +3,6 @@ import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, t
 import { auth, functions, rtdb } from '../firebase'
 import { submitInstructorOutcome } from '../api'
 import { crisisConfig } from '../gameConfig'
-import CrisisLivePanel from './CrisisLivePanel'
 
 // ── Role labels from game config (SINGLE matching role — `player`) ─────────────
 
@@ -66,13 +65,16 @@ function CrisisManualOutcomeControl({ submitting, error, onSubmit }: DeadlockRes
 
 // ── Page component ────────────────────────────────────────────────────────────
 
+/** Open the §4A live view in its OWN window (SAA pattern) — carries the launch query so it
+ *  bootstraps its own instructor session; sized for a second screen during class. */
+function openLiveView() {
+  const url = `/live${window.location.search}`
+  window.open(url, 'crisis-live-view', 'width=1100,height=800')
+}
+
 export default function InstructorDashboard() {
   return (
     <>
-      {/* §4A live WINDOW (Crisis-specific), above the shared roster/match/score dashboard. */}
-      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 1rem' }}>
-        <CrisisLivePanel />
-      </div>
       <SharedDashboard
       title="Instructor Dashboard — Crisis"
       roleLabels={roleLabels}
@@ -85,6 +87,16 @@ export default function InstructorDashboard() {
       reportsRoute="/reports"
       scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
     />
+      {/* Crisis-specific: open the live view in its own window (BELOW the shared dashboard,
+          never above the nav bar). */}
+      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 1.5rem 2rem', fontFamily: 'sans-serif' }}>
+        <button data-testid="crisis-open-live" onClick={openLiveView} style={{ padding: '0.4rem 1rem', fontWeight: 600 }}>
+          Open live view ⧉
+        </button>
+        <span style={{ color: '#57606a', fontSize: '0.85rem', marginLeft: '0.75rem' }}>
+          Opens in a separate window — set the round clock and start each group there.
+        </span>
+      </div>
     </>
   )
 }
