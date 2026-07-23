@@ -30,6 +30,10 @@ import {
   openRoundState, applyAction, expireStage, buildSeatView, roleOfSeat, requiredSeats,
   type CrisisState, type SeatAction,
 } from './round/machine'
+import {
+  buyerDefaultAllocation, sellerDefaultBid, sellerDefaultFix, makeRng, type SellerType,
+} from './round/decide'
+import { enqueueBotTask } from './botTasks'
 
 const isEmu = () => process.env.FUNCTIONS_EMULATOR === 'true'
 const authHeaderOf = (req: CallableRequest): string | undefined =>
@@ -76,6 +80,12 @@ interface StoredDoc {
   clock_enabled: boolean
   /** null when the clock is off (online play) — the UI renders no clock at all. */
   stage_deadline_ms: number | null
+  /** When the current stage opened (ms) — the bot resolve-on-read backstop's overdue clock. */
+  stage_opened_ms: number
+  /** Seats filled by server bots (§5.1). [] for all-human groups. */
+  bot_seats?: number[]
+  /** seat (string) → the bot Seller's FIXED type (§5.2 — drawn once at formation). */
+  bot_type_by_seat?: Record<string, SellerType>
 }
 
 /** A fresh stage deadline, or null when the clock is off. */
@@ -83,8 +93,13 @@ function nextDeadline(stored: StoredDoc, clockNowMs: number): number | null {
   return stored.clock_enabled ? clockNowMs + stored.stage_seconds * 1000 : null
 }
 
-/** Full stored payload for a wholesale (no-merge) write. */
-function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: number | null) {
+const hasBots = (stored: StoredDoc): boolean => (stored.bot_seats?.length ?? 0) > 0
+
+/**
+ * Full stored payload for a wholesale (no-merge) write. `stageOpenedMs` is passed only
+ * when a stage just closed (a new stage opened); otherwise the running value is kept.
+ */
+function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: number | null, stageOpenedMs?: number) {
   return {
     state: newState,
     group_id: stored.group_id,
@@ -93,6 +108,9 @@ function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: num
     stage_seconds: stored.stage_seconds,
     clock_enabled: stored.clock_enabled,
     stage_deadline_ms: deadlineMs,
+    stage_opened_ms: stageOpenedMs ?? stored.stage_opened_ms,
+    bot_seats: stored.bot_seats ?? [],
+    bot_type_by_seat: stored.bot_type_by_seat ?? {},
     updated_at: FieldValue.serverTimestamp(),
   }
 }
@@ -123,9 +141,19 @@ export const openRound = onCall(CORS, async (request) => {
   const seatByPid: Record<string, number> = {}
   playerPids.forEach((pid, i) => { pidBySeat[String(i)] = pid; seatByPid[pid] = i })
 
+  // Bots (§5.1): map the group's bot pids → seats + their FIXED type (drawn at formation).
+  const botPids = new Set((groupSnap.data()?.['bot_participants'] as string[] | undefined) ?? [])
+  const botTypesByPid = (groupSnap.data()?.['bot_types'] as Record<string, SellerType> | undefined) ?? {}
+  const botSeats: number[] = []
+  const botTypeBySeat: Record<string, SellerType> = {}
+  playerPids.forEach((pid, i) => {
+    if (botPids.has(pid)) { botSeats.push(i); botTypeBySeat[String(i)] = botTypesByPid[pid] ?? 'low' }
+  })
+
   const devSeed = isEmu() ? (data['_dev'] as Record<string, unknown> | undefined)?.['seed'] : undefined
   const seed = typeof devSeed === 'number' ? devSeed : hashString(groupId)
 
+  const now = nowMs(data)
   const state = openRoundState([0, 1, 2], seed, numRounds)
   await stateDoc(iid, groupId).set({
     state,
@@ -134,10 +162,16 @@ export const openRound = onCall(CORS, async (request) => {
     seat_by_pid: seatByPid,
     stage_seconds: stageSeconds,
     clock_enabled: clockEnabled,
-    stage_deadline_ms: clockEnabled ? nowMs(data) + stageSeconds * 1000 : null,
+    stage_deadline_ms: clockEnabled ? now + stageSeconds * 1000 : null,
+    stage_opened_ms: now,
+    bot_seats: botSeats,
+    bot_type_by_seat: botTypeBySeat,
     updated_at: FieldValue.serverTimestamp(),
   })
-  return { ok: true as const, round: state.round, stage: state.stage, clockEnabled }
+  // Schedule the first bot pass (round 1). No-op for all-human groups; the emulator (no
+  // Cloud Tasks) relies on runBotActionsForTest / the resolve-on-read backstop instead.
+  if (botSeats.length > 0) await enqueueBotTask(iid, groupId, state.round, state.stage)
+  return { ok: true as const, round: state.round, stage: state.stage, clockEnabled, botSeats: botSeats.length }
 })
 
 // ── the auth-free action core (BOT SEAM #1 — shared by human callables AND, in Slice 5,
@@ -153,7 +187,7 @@ export async function applySeatAction(
   const db = admin.firestore()
   const ref = stateDoc(iid, groupId)
   const instanceRef = db.collection('game_instances').doc(iid)
-  return db.runTransaction(async (tx) => {
+  const outcome = await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref)
     if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
     const stored = snap.data() as StoredDoc
@@ -161,15 +195,16 @@ export async function applySeatAction(
     if (seat === undefined) throw new HttpsError('permission-denied', 'You are not in this group.')
 
     const action = buildAction(seat, stored.state)
-    if (action === null) return { ok: true as const, skipped: true, stageClosed: false, finished: false }
+    if (action === null) return { ok: true as const, skipped: true, stageClosed: false, finished: false, hasBots: hasBots(stored), round: stored.state.round, stage: stored.state.stage }
 
     const wasFirstAction = stored.state.round === 1 && stored.state.everActed.length === 0
     const result = applyAction(stored.state, seat, action, DEFAULT_CRISIS_SETTINGS)
     if (!result.ok) return { ok: false as const, reason: result.reason }
 
-    // A new stage/round opened → fresh deadline; else keep the running one. (null when clock off.)
+    // A new stage/round opened → fresh deadline + fresh stage_opened_ms; else keep them.
     const deadline = result.stageClosed ? nextDeadline(stored, clockNowMs) : stored.stage_deadline_ms
-    tx.set(ref, storedPayload(stored, result.state, deadline))
+    const openedMs = result.stageClosed ? clockNowMs : stored.stage_opened_ms
+    tx.set(ref, storedPayload(stored, result.state, deadline, openedMs))
 
     // Groups lock at first submission (§6): stamp the group doc once round-1 play begins.
     if (wasFirstAction) {
@@ -177,8 +212,87 @@ export async function applySeatAction(
     }
     if (result.finished) writeEndOutcomes(tx, instanceRef, stored, result.state)
 
-    return { ok: true as const, skipped: false, stageClosed: result.stageClosed, finished: result.finished, round: result.state.round, stage: result.state.stage }
+    return { ok: true as const, skipped: false, stageClosed: result.stageClosed, finished: result.finished, hasBots: hasBots(stored), round: result.state.round, stage: result.state.stage }
   })
+
+  // Post-commit: a stage just closed in a group that has bots and is still running → schedule
+  // the next bot pass (idempotent, deduped by round+stage). Best-effort; the backstop covers a miss.
+  if (outcome.ok && !outcome.skipped && outcome.stageClosed && !outcome.finished && outcome.hasBots) {
+    await enqueueBotTask(iid, groupId, outcome.round, outcome.stage)
+  }
+  return outcome
+}
+
+// ── THE BOT RUNNER (§5.1) — ONE decide(), consumed here AND by the browser driver ──
+// A bot's decision is the §3.2 default table with its FIXED Seller type (§5.2 — timeout
+// fill would draw the type fresh PER ROUND; a bot holds it all 10 rounds). buildBotAction
+// picks the action the bot owes this stage; runBotActions writes it through applySeatAction
+// (the SAME transaction core a human hits — no HTTP fake). IDEMPOTENT by construction: a
+// bot that already acted this stage produces owes===null / an already-acted reject → no write.
+
+/** Raw prior-fix counts per seller across closed rounds (§3.2 note — count, not rate). */
+function priorFixCounts(state: CrisisState): { f1: number; f2: number } {
+  let f1 = 0, f2 = 0
+  for (const h of state.history) {
+    if (h.crisisOccurred && h.fixed.s1) f1++
+    if (h.crisisOccurred && h.fixed.s2) f2++
+  }
+  return { f1, f2 }
+}
+
+/** The bot's action for the current stage, or null if it owes nothing right now. */
+function buildBotAction(seat: number, state: CrisisState, botType: SellerType): SeatAction | null {
+  if (roleOfSeat(state, seat) === null) return null
+  const owes = buildSeatView(state, seat).owes
+  if (owes === null) return null
+  if (owes === 'bid') {
+    // Seller: bid from the FIXED type; the VALUE is redrawn within range each round.
+    const rng = makeRng((state.seed + state.round * 15485863 + seat * 32452843) | 0)
+    return { kind: 'bid', bid: sellerDefaultBid(botType, rng, DEFAULT_CRISIS_SETTINGS) }
+  }
+  if (owes === 'fix') {
+    return { kind: 'fix', fixed: sellerDefaultFix(botType) } // HIGH always fixes, LOW never
+  }
+  // Buyer default: 80 to the lower bid; ties by prior-fix count; full tie → 50/50.
+  const { f1, f2 } = priorFixCounts(state)
+  const { a1, a2 } = buyerDefaultAllocation(state.bids[state.seller1Seat], state.bids[state.seller2Seat], f1, f2, DEFAULT_CRISIS_SETTINGS)
+  return { kind: 'allocation', a1, a2 }
+}
+
+/** Run one bot-action pass for a group: each bot seat that owes an action writes it. */
+export async function runBotActions(iid: string, groupId: string) {
+  const snap = await stateDoc(iid, groupId).get()
+  if (!snap.exists) return { acted: 0, skipped: 0, status: 'not_found' as const }
+  const stored = snap.data() as StoredDoc
+  const botSeats = stored.bot_seats ?? []
+  if (stored.state.status !== 'in_progress' || botSeats.length === 0) {
+    return { acted: 0, skipped: 0, status: stored.state.status }
+  }
+  let acted = 0, skipped = 0
+  for (const seat of botSeats) {
+    const pid = stored.pid_by_seat[String(seat)]
+    if (!pid) { skipped++; continue }
+    const botType = stored.bot_type_by_seat?.[String(seat)] ?? 'low'
+    // Each bot acts in its OWN transaction — a duplicate delivery (Cloud Tasks retry)
+    // re-reads and applyAction rejects "already acted" → a no-op, never a double action.
+    const r = await applySeatAction(iid, groupId, pid, (s, st) => buildBotAction(s, st, botType), Date.now())
+    if (r.ok && !r.skipped) acted++
+    else skipped++
+  }
+  return { acted, skipped, status: 'in_progress' as const }
+}
+
+/** Resolve-on-read backstop: rescue an OVERDUE bot pass (a missed Cloud Task) BEFORE the
+ *  clock could time the bot out — so a bot always acts with its fixed type, and the clock
+ *  only ever defaults a genuinely-absent HUMAN. Gated on stage_opened_ms so it does not
+ *  defeat the plausible-pacing delay. */
+const BOT_BACKSTOP_MS = 28_000
+async function backstopBots(iid: string, groupId: string, stored: StoredDoc, clockNowMs: number): Promise<void> {
+  if (stored.state.status !== 'in_progress' || !hasBots(stored)) return
+  if (clockNowMs - stored.stage_opened_ms < BOT_BACKSTOP_MS) return
+  const anyBotOwes = (stored.bot_seats ?? []).some((seat) => buildSeatView(stored.state, seat).owes !== null)
+  if (!anyBotOwes) return
+  await runBotActions(iid, groupId)
 }
 
 // ── shared student wrapper: auth, then the auth-free core ─────────────────────────
@@ -231,10 +345,21 @@ async function tickClock(iid: string, groupId: string, clockNowMs: number) {
 
     const result = expireStage(stored.state, DEFAULT_CRISIS_SETTINGS)
     const deadline = nextDeadline(stored, clockNowMs)
-    tx.set(ref, storedPayload(stored, result.state, deadline))
+    const openedMs = result.stageClosed ? clockNowMs : stored.stage_opened_ms
+    tx.set(ref, storedPayload(stored, result.state, deadline, openedMs))
     if (result.finished) writeEndOutcomes(tx, instanceRef, stored, result.state)
     return { ok: true as const, closed: result.stageClosed, finished: result.finished, round: result.state.round, stage: result.state.stage }
   })
+}
+
+/** Read-then-backstop: run an overdue bot pass BEFORE the clock tick (bots act with their
+ *  fixed type before the clock could default them). Best-effort; ignore contention. */
+async function backstopThenTick(iid: string, groupId: string, clockNowMs: number): Promise<void> {
+  try {
+    const snap = await stateDoc(iid, groupId).get()
+    if (snap.exists) await backstopBots(iid, groupId, snap.data() as StoredDoc, clockNowMs)
+  } catch { /* another writer won */ }
+  try { await tickClock(iid, groupId, clockNowMs) } catch { /* another writer won */ }
 }
 
 export const checkRoundClock = onCall(CORS, async (request) => {
@@ -258,9 +383,8 @@ export const getRoundView = onCall(CORS, async (request) => {
   const groupId = String(data['group_id'] ?? '')
   if (!groupId) throw new HttpsError('invalid-argument', 'group_id required')
 
-  // Resolve-on-read: a polling student advances a genuinely stalled clock (same guard as
-  // checkRoundClock — only closes if the deadline passed). Best-effort; ignore contention.
-  try { await tickClock(gameInstanceId, groupId, nowMs(data)) } catch { /* another writer won */ }
+  // Resolve-on-read: rescue an overdue bot pass, THEN advance a genuinely stalled clock.
+  await backstopThenTick(gameInstanceId, groupId, nowMs(data))
 
   const snap = await stateDoc(gameInstanceId, groupId).get()
   if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
@@ -283,6 +407,7 @@ export const getInstructorRoundView = onCall(CORS, async (request) => {
   const groupId = String(data['group_id'] ?? '')
   if (!groupId) throw new HttpsError('invalid-argument', 'group_id required')
 
+  await backstopThenTick(iid, groupId, nowMs(data))
   const snap = await stateDoc(iid, groupId).get()
   if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
   const stored = snap.data() as StoredDoc
@@ -323,6 +448,11 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
     instanceRef.collection('crisis_round').get(),
     instanceRef.collection('participants').get(),
   ])
+
+  // Resolve-on-read backstop: the dashboard polls ~2s, a reliable place to rescue an
+  // overdue bot pass. Fire-and-await; the freshly-acted state surfaces on the next poll.
+  const now = nowMs(data)
+  await Promise.all(roundsSnap.docs.map((r) => backstopBots(iid, r.id, r.data() as StoredDoc, now).catch(() => {})))
 
   // participant → { name, isBot }
   const meta = new Map<string, { name: string; isBot: boolean }>()

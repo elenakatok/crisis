@@ -18,6 +18,10 @@
 
 import { chromium } from 'playwright'
 import { setTimeout as sleep } from 'node:timers/promises'
+// Drive seats through the SHARED decide() (Slice 1) — real varied play (high/low types,
+// mixed fix, buyer default), NOT a hardcoded path. Imported inward from functions/lib.
+import { drawSellerType, sellerDefaultBid, sellerDefaultFix, buyerDefaultAllocation } from './functions/lib/round/decide.js'
+import { DEFAULT_CRISIS_SETTINGS as S } from './functions/lib/round/settings.js'
 
 const LAUNCHER = 'http://localhost:5180'
 const PROJECT  = 'crisis-mygames-live'
@@ -62,21 +66,37 @@ async function openWindow(url, tileIdx) {
 }
 
 const stateOf = (page) => page.evaluate(() => window.__crisisState ?? null)
-async function actOnce(page, st, plan) {
+
+/** Choose the action via the SHARED decide() primitives, using this seat's FIXED type. */
+function priorFixCounts(history) {
+  let f1 = 0, f2 = 0
+  for (const h of history) { if (h.crisisOccurred && h.fixed.s1) f1++; if (h.crisisOccurred && h.fixed.s2) f2++ }
+  return { f1, f2 }
+}
+async function actOnce(page, st, seatType) {
   try {
-    if (st.owes === 'bid') { await page.fill('[data-testid="crisis-bid-input"]', String(plan.bid(st))); await page.click('[data-testid="crisis-submit"]'); return true }
-    if (st.owes === 'allocation') { const [a1, a2] = plan.alloc(st); await page.fill('[data-testid="crisis-alloc-1"]', String(a1)); await page.fill('[data-testid="crisis-alloc-2"]', String(a2)); await page.click('[data-testid="crisis-submit"]'); return true }
-    if (st.owes === 'fix') { await page.click(plan.fix(st) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]'); return true }
+    if (st.owes === 'bid') {
+      await page.fill('[data-testid="crisis-bid-input"]', String(sellerDefaultBid(seatType, Math.random, S)))
+      await page.click('[data-testid="crisis-submit"]'); return true
+    }
+    if (st.owes === 'allocation') {
+      const { f1, f2 } = priorFixCounts(st.history)
+      const { a1, a2 } = buyerDefaultAllocation(st.currentBids.s1, st.currentBids.s2, f1, f2, S)
+      await page.fill('[data-testid="crisis-alloc-1"]', String(a1))
+      await page.fill('[data-testid="crisis-alloc-2"]', String(a2))
+      await page.click('[data-testid="crisis-submit"]'); return true
+    }
+    if (st.owes === 'fix') { await page.click(sellerDefaultFix(seatType) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]'); return true }
   } catch { /* screen advanced between read+act */ }
   return false
 }
-async function driveToFinish(pages, plan, maxSteps = 800) {
+async function driveToFinish(pages, maxSteps = 800) {
   for (let step = 0; step < maxSteps; step++) {
     for (const p of pages) {
-      const st = await stateOf(p).catch(() => null)
-      if (st && st.status === 'in_progress' && st.owes) { if (await actOnce(p, st, plan)) await sleep(THINK_MS) }
+      const st = await stateOf(p.page).catch(() => null)
+      if (st && st.status === 'in_progress' && st.owes) { if (await actOnce(p.page, st, p.type)) await sleep(THINK_MS) }
     }
-    const statuses = await Promise.all(pages.map(p => stateOf(p).then(s => s?.status).catch(() => null)))
+    const statuses = await Promise.all(pages.map(p => stateOf(p.page).then(s => s?.status).catch(() => null)))
     if (statuses.every(s => s === 'finished')) return true
     await sleep(STEP_MS)
   }
@@ -109,9 +129,10 @@ async function main() {
   }
   check(studentUrls.length === 3, '3 students driven through assignRole→KC→prep→confirm→verifyAttendanceCode')
 
-  // 3. Open 3 REAL student windows → establish presence.
+  // 3. Open 3 REAL student windows → establish presence. Each seat draws a FIXED Seller
+  //    type (used iff it becomes a Seller) so play is varied, not one path.
   const pages = []
-  for (let i = 0; i < 3; i++) pages.push(await openWindow(studentUrls[i], i))
+  for (let i = 0; i < 3; i++) pages.push({ page: await openWindow(studentUrls[i], i), type: drawSellerType(Math.random) })
   await sleep(8000)
   check(true, '3 student windows open on crisis.mygames.live (presence registering)')
 
@@ -144,22 +165,38 @@ async function main() {
 
   // 7. Play 10 rounds through the real prod UI.
   banner('Playing 10 rounds through the REAL prod UI')
-  for (const p of pages) await p.waitForFunction(() => !!window.__crisisState, null, { timeout: 45000 })
-  const roles = await Promise.all(pages.map(p => stateOf(p).then(s => s.role)))
+  for (const p of pages) await p.page.waitForFunction(() => !!window.__crisisState, null, { timeout: 45000 })
+  const roles = await Promise.all(pages.map(p => stateOf(p.page).then(s => s.role)))
   check(new Set(roles).size === 3 && roles.includes('buyer'), `roles assigned late in prod: ${roles.join(', ')}`)
-  const plan = { bid: (st) => (st.role === 'seller1' ? 15 : 18), alloc: () => [60, 40], fix: () => true }
-  const done = await driveToFinish(pages, plan)
-  check(done, 'all three seats reached FINISHED through the prod UI')
+  // Assign types by role so play covers BOTH fix outcomes: one Seller HIGH (fixes → "Yes"),
+  // one Seller LOW (never fixes → "No"). The Buyer's type is unused (runs the buyer default).
+  let sellerSeen = 0
+  for (let i = 0; i < pages.length; i++) {
+    pages[i].type = roles[i] === 'buyer' ? 'low' : (sellerSeen++ === 0 ? 'high' : 'low')
+  }
+  const done = await driveToFinish(pages)
+  check(done, 'all three seats reached FINISHED through the prod UI (played via decide())')
 
-  const finPresent = await Promise.all(pages.map(p => p.locator('[data-testid="crisis-finished"]').count().then(n => n > 0)))
+  const finPresent = await Promise.all(pages.map(p => p.page.locator('[data-testid="crisis-finished"]').count().then(n => n > 0)))
   check(finPresent.every(Boolean), 'every seat shows the finished screen')
-  const rowCounts = await Promise.all(pages.map(p => p.locator('[data-testid^="crisis-history-row-"]').count()))
+  const rowCounts = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-history-row-"]').count()))
   check(rowCounts.every(c => c === 10), `history has 10 rows on every seat (${rowCounts.join('/')})`)
-  const hists = await Promise.all(pages.map(p => p.textContent('[data-testid="crisis-history"]')))
+  const hists = await Promise.all(pages.map(p => p.page.textContent('[data-testid="crisis-history"]')))
   check(hists.every(h => h === hists[0]), 'history byte-identical across all three seats (§1.1)')
-  const buyerCells = await Promise.all(pages.map(p => p.locator('[data-testid^="crisis-buyer-profit-"]').count()))
+  const buyerCells = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-buyer-profit-"]').count()))
   check(buyerCells.every(c => c === 10), 'Buyer\'s Profit column renders on every seat (per-round, all 10 rows)')
-  const totals = await Promise.all(pages.map(p => p.textContent('[data-testid="crisis-total-profit"]').catch(() => null)))
+
+  // ⚠ Fix column: with varied decide() play, Yes / No / — must all render (a LOW seller
+  // with units in a crisis renders "No" — the previously untested path).
+  const hist0 = await stateOf(pages[0].page)
+  const anyCrisisFixed = hist0.history.some(h => h.crisisOccurred && (h.fixed.s1 || h.fixed.s2))
+  const anyCrisisUnfixed = hist0.history.some(h => h.crisisOccurred && ((h.allocation.a1 > 0 && !h.fixed.s1) || (h.allocation.a2 > 0 && !h.fixed.s2)))
+  const anyNoCrisis = hist0.history.some(h => !h.crisisOccurred)
+  const tableText = hists[0]
+  check(anyCrisisUnfixed && /\bNo\b/.test(tableText), '⚠ "No" renders in a Fix column (crisis NOT fixed — the untested path)')
+  check(anyCrisisFixed ? /\bYes\b/.test(tableText) : true, '"Yes" renders when a crisis was fixed')
+  check(anyNoCrisis ? /—/.test(tableText) : true, '"—" renders for a no-crisis round')
+  const totals = await Promise.all(pages.map(p => p.page.textContent('[data-testid="crisis-total-profit"]').catch(() => null)))
   console.log(`  total profits shown: ${totals.join(' / ')}`)
 
   // 7b. Dashboard now shows the group finished.

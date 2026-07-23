@@ -90,6 +90,33 @@ const allocG  = (gid, groupId, pid, a1, a2) => callFn('submitAllocation', { _tes
 const fixG    = (gid, groupId, pid, f) => callFn('submitFix', { _test: { participant_id: pid, game_instance_id: gid }, group_id: groupId, fixed: f })
 async function roleMapG(gid, groupId) { const v = (await iviewG(gid, groupId)).result; const m = {}; for (const s of v.seats) m[s.role] = s.participantId; return m }
 
+// ── Slice 5 bot helpers (drive the REAL matcher + the real bot runner) ────────────
+const arrVal = (f) => (f?.arrayValue?.values ?? []).map(v => v.stringValue)
+const seedRoster = (gid, pids) => fetch(`${FUNCTIONS}/seedRosterForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, participant_ids: pids }) })
+const match      = (gid) => callFn('triggerMatching', asDev(gid, {}))          // the REAL chained matcher (the Match button's callable)
+const runBots    = async (gid, groupId) => { const r = await fetch(`${FUNCTIONS}/runBotActionsForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, group_id: groupId }) }); return (await r.json())?.data ?? {} }
+const rosterOf   = (gid) => callFn('getRoster', asDev(gid, {}))
+async function groupDoc(gid, groupId) { return (await fsGet(gid, `groups/${groupId}`))?.fields ?? {} }
+async function botPidsOf(gid, groupId) { return new Set(arrVal((await groupDoc(gid, groupId)).bot_participants)) }
+
+/** Drive a mixed group to finish: humans act via callables, bots via the real bot runner. */
+async function driveMixedToFinish(gid, groupId, humanPlan = { bid: 15, a1: 50, a2: 50, fix: true }, maxSteps = 400) {
+  const botPids = await botPidsOf(gid, groupId)
+  for (let step = 0; step < maxSteps; step++) {
+    const v = (await iviewG(gid, groupId)).result
+    if (v.status === 'finished') return v
+    for (const seat of v.pendingSeats) {
+      const s = v.seats.find(x => x.seat === seat)
+      if (!s || botPids.has(s.participantId)) continue // a bot — it acts via runBots
+      if (v.stage === 'bidding') await bidG(gid, groupId, s.participantId, humanPlan.bid)
+      else if (v.stage === 'allocation') await allocG(gid, groupId, s.participantId, humanPlan.a1, humanPlan.a2)
+      else if (v.stage === 'fixing') await fixG(gid, groupId, s.participantId, humanPlan.fix)
+    }
+    await runBots(gid, groupId) // bot seats act (idempotent)
+  }
+  return (await iviewG(gid, groupId)).result
+}
+
 /** role → pid, read from the instructor view after open (roles assigned late). */
 async function roleMap(gid) {
   const v = (await iview(gid)).result
@@ -422,6 +449,177 @@ async function main() {
     check(g.seats.length === 2, '(D7) bot seat filtered out — only 2 seats shown (of 3)')
     check(!g.seats.some(s => s.participantId === 'pb'), '(D7) the bot participant is absent from seat rows')
     check(g.waitingOn.length <= 2 && g.waitingOn.every(w => w.role !== null), '(D7) waitingOn is drawn only from the shown (non-bot) seats')
+  }
+
+  // ══ SLICE 5 — BOTS (server seat-filler; ONE decide() shared with the browser driver) ══
+
+  const HIGH = (b) => b >= 22 && b <= 27
+  const LOW  = (b) => b >= 12 && b <= 17
+  async function botTypesOf(gid, groupId) {
+    const gd = await groupDoc(gid, groupId); const out = {}
+    const bt = gd.bot_types?.mapValue?.fields ?? {}
+    for (const [pid, v] of Object.entries(bt)) out[pid] = v.stringValue
+    return out
+  }
+  /** Open with a seed that puts pid into wantRole (roles are assigned late by seed). */
+  async function openForRole(gid, groupId, pid, wantRole) {
+    for (let seed = 1; seed < 300; seed++) {
+      await openG(gid, groupId, seed)
+      const v = (await iviewG(gid, groupId)).result
+      if (v.seats.find(s => s.participantId === pid)?.role === wantRole) return seed
+    }
+    throw new Error(`no seed put ${pid} in ${wantRole}`)
+  }
+
+  // (B1) 2 humans + 1 bot, full 10 rounds
+  banner('(B1) mixed group: 2 humans + 1 bot, full 10 rounds')
+  {
+    const gid = 'bot-2h1b'; await seedRoster(gid, ['h1', 'h2']); const m = await match(gid)
+    check(m.result?.remainder?.created && m.result.remainder.bots === 1, '(B1) matcher bot-filled remainder: 2 humans + 1 bot')
+    const groupId = m.result.remainder.group_id
+    await openG(gid, groupId, 1)
+    const v = await driveMixedToFinish(gid, groupId)
+    check(v.status === 'finished' && v.history.length === 10, '(B1) ran to completion, 10 rounds')
+  }
+
+  // (B2) 1 human + 2 bots, full 10 rounds (also the ONE-human group, §5.4)
+  banner('(B2) 1 human + 2 bots, full 10 rounds (one-human group allowed)')
+  {
+    const gid = 'bot-1h2b'; await seedRoster(gid, ['solo']); const m = await match(gid)
+    check(m.result?.remainder?.bots === 2, '(B2) 1 human + 2 bots formed (no minimum-humans guard)')
+    const groupId = m.result.remainder.group_id
+    await openG(gid, groupId, 1)
+    const v = await driveMixedToFinish(gid, groupId)
+    check(v.status === 'finished' && v.history.length === 10, '(B2) one-human group ran to completion')
+  }
+
+  // (B3)+(B5) bot type HELD CONSTANT all 10 rounds; HIGH bids [22,27]+always fix, LOW [12,17]+never
+  banner('(B3/B5) bot seller type held constant 10 rounds; HIGH/LOW bid ranges + fix behaviour')
+  {
+    const gid = 'bot-type'; await seedRoster(gid, ['buyerh']); const m = await match(gid)
+    const groupId = m.result.remainder.group_id
+    // put the human in the BUYER seat so BOTH bots are sellers
+    await openForRole(gid, groupId, 'buyerh', 'buyer')
+    const types = await botTypesOf(gid, groupId)
+    const v = await driveMixedToFinish(gid, groupId)
+    check(v.status === 'finished', '(B3) mixed bot-seller game finished')
+    // map each bot seat → role → its per-round bids/fixes from history
+    const iv = (await iviewG(gid, groupId)).result
+    let checkedSellers = 0
+    for (const s of iv.seats) {
+      if (s.role === 'buyer') continue
+      const type = types[s.participantId]; if (!type) continue // human seller (none here)
+      const key = s.role === 'seller1' ? 's1' : 's2'
+      const bids = v.history.map(h => h.bids[key])
+      const inRange = type === 'high' ? bids.every(HIGH) : bids.every(LOW)
+      check(inRange, `(B5) bot seller (${type}) bid in range every round: ${bids.join(',')}`)
+      check(new Set(bids).size >= 1 && bids.every(b => (type === 'high' ? HIGH(b) : LOW(b))), `(B3) type CONSTANT across all 10 rounds (no flip)`)
+      const fixes = v.history.filter(h => h.crisisOccurred).map(h => h.fixed[key])
+      check(type === 'high' ? fixes.every(f => f === true) : fixes.every(f => f === false), `(B5) bot seller (${type}) ${type === 'high' ? 'always fixes' : 'never fixes'}`)
+      checkedSellers++
+    }
+    check(checkedSellers === 2, '(B3/B5) both bot sellers analysed')
+  }
+
+  // (B6) bot BUYER runs the buyer default (80 to the lower bid)
+  banner('(B6) bot buyer: 80 to the lower bid')
+  {
+    const gid = 'bot-buyer'; await seedRoster(gid, ['sellerh']); const m = await match(gid)
+    const groupId = m.result.remainder.group_id
+    // human is a seller → a BOT is the buyer
+    await openForRole(gid, groupId, 'sellerh', 'seller1')
+    const botPids = await botPidsOf(gid, groupId)
+    const iv0 = (await iviewG(gid, groupId)).result
+    const buyerSeat = iv0.seats.find(s => s.role === 'buyer')
+    check(botPids.has(buyerSeat.participantId), '(B6) the buyer seat is a bot')
+    const v = await driveMixedToFinish(gid, groupId)
+    // human seller1 bids 15 (driveMixed default); bot seller2 bids in its range. Buyer default: 80 to lower.
+    const okAlloc = v.history.every(h => {
+      const lowerIsS1 = h.bids.s1 <= h.bids.s2
+      return lowerIsS1 ? (h.allocation.a1 >= h.allocation.a2) : (h.allocation.a2 >= h.allocation.a1)
+    })
+    check(okAlloc, '(B6) bot buyer gave the MAJORITY to the lower bid every round')
+  }
+
+  // (B7) IDEMPOTENCY — fire the bot runner twice, no double-apply
+  banner('(B7) idempotency — bot action fired twice must not double-apply')
+  {
+    const gid = 'bot-idem'; await seedRoster(gid, ['buyerh']); const m = await match(gid)
+    const groupId = m.result.remainder.group_id
+    await openForRole(gid, groupId, 'buyerh', 'buyer') // both bots sellers, both owe a bid now
+    const r1 = await runBots(gid, groupId)
+    const after1 = (await iviewG(gid, groupId)).result
+    const r2 = await runBots(gid, groupId) // duplicate delivery
+    const after2 = (await iviewG(gid, groupId)).result
+    check(r1.acted === 2, '(B7) first pass: both bot sellers acted')
+    check(r2.acted === 0 && r2.skipped === 2, '(B7) second pass (retry): NO re-action (both already acted)')
+    check(after1.stage === after2.stage && after1.round === after2.round, '(B7) state unchanged by the duplicate — no double-advance')
+  }
+
+  // (B8) bots EXCLUDED from scoreAndRecord
+  banner('(B8) bots excluded from scoreAndRecord')
+  {
+    const gid = 'bot-score'; await seedRoster(gid, ['solo']); const m = await match(gid)
+    const groupId = m.result.remainder.group_id
+    await openG(gid, groupId, 1); await driveMixedToFinish(gid, groupId)
+    const scored = await callFn('scoreAndRecord', { _dev: { game_instance_id: gid, callback_url: '' } })
+    check(scored.result?.ok && scored.result.scored === 1, '(B8) exactly 1 scored (the human) — bots excluded')
+    const botPids = [...await botPidsOf(gid, groupId)]
+    const botDoc = await fsGet(gid, `participants/${botPids[0]}`)
+    check(botDoc?.fields?.finalized_at == null && botDoc?.fields?.raw_score == null, '(B8) bot participant has no score written')
+  }
+
+  // (B9) bots HIDDEN on the dashboard (Slice-4 filter, now with REAL bots)
+  banner('(B9) bots hidden on the dashboard (real bots present)')
+  {
+    const gid = 'bot-dash'; await seedRoster(gid, ['solo']); const m = await match(gid)
+    const groupId = m.result.remainder.group_id
+    await openG(gid, groupId, 1)
+    const d = (await dash(gid)).result
+    const g = d.groups.find(x => x.groupId === groupId)
+    check(g.seats.length === 1 && !g.seats.some(s => s.isBot), '(B9) only the 1 human seat shown (2 bots hidden)')
+    check(g.waitingOn.every(w => w.role !== null), '(B9) waitingOn contains no bot seats')
+  }
+
+  // (B10) remainder groups: class sizes 4,5,7,10 → correct bot counts, CONCENTRATED
+  banner('(B10) remainder bot counts (4,5,7,10) — concentrated in one group')
+  {
+    const cases = [[4, 2], [5, 1], [7, 2], [10, 2]]
+    for (const [n, expectBots] of cases) {
+      const gid = `bot-rem-${n}`
+      await seedRoster(gid, Array.from({ length: n }, (_, i) => `p${i}`))
+      await match(gid)
+      const groups = (await rosterOf(gid)).result.groups
+      const counts = []
+      for (const g of groups) { const d = await groupDoc(gid, g.group_id); counts.push(Number(d.bot_count?.integerValue ?? 0)) }
+      const totalBots = counts.reduce((a, b) => a + b, 0)
+      const groupsWithBots = counts.filter(c => c > 0).length
+      check(totalBots === expectBots, `(B10) n=${n} → ${expectBots} bots total`)
+      check(groupsWithBots === 1, `(B10) n=${n} → bots concentrated in exactly ONE group`)
+    }
+  }
+
+  // (B11) timeout fill REDRAWS the type per round (the other half of §5.2)
+  banner('(B11) timeout fill redraws type per round (vs bot fixed)')
+  {
+    // find a 3-human seed where a fully-timed-out seller's bids span BOTH ranges over 10 rounds
+    let found = null
+    for (let seed = 1; seed < 200 && !found; seed++) {
+      const gid = `to-${seed}`; await seedGroup(gid, PIDS); await open(gid, seed)
+      // drive all 10 rounds purely by the clock (every seat times out every stage)
+      let vt = tickNow()
+      for (let guard = 0; guard < 60; guard++) {
+        const v = (await iview(gid)).result
+        if (v.status === 'finished') break
+        await tick(gid, vt); vt += 200_000
+      }
+      const v = (await iview(gid)).result
+      if (v.status !== 'finished') continue
+      // seller1 seat bids across rounds (all timeout-defaulted)
+      const b1 = v.history.map(h => h.bids.s1)
+      if (b1.some(HIGH) && b1.some(LOW)) { found = { gid, b1 }; break }
+    }
+    check(!!found, '(B11) timeout-defaulted seller drew BOTH high and low across rounds — per-round redraw (not fixed)')
   }
 
   console.log('\n' + '═'.repeat(72))

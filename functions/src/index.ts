@@ -9,7 +9,6 @@ import {
   makeVerifyAttendanceCode,
   makeGetRoster,
   makeSyncRoster,
-  makeTriggerMatching,
   makeStartNegotiation,
   makeSubmitLeadOutcome,
   makeSubmitConfirmation,
@@ -48,7 +47,6 @@ export const generateAttendanceCode = makeGenerateAttendanceCode(crisisGameDef)
 export const verifyAttendanceCode   = makeVerifyAttendanceCode(crisisGameDef)
 export const getRoster              = makeGetRoster(crisisGameDef)
 export const syncRoster             = makeSyncRoster(crisisGameDef)
-export const triggerMatching        = makeTriggerMatching(crisisGameDef)
 export const startNegotiation           = makeStartNegotiation(crisisGameDef)
 export const submitLeadOutcome          = makeSubmitLeadOutcome(crisisGameDef)
 export const submitConfirmation         = makeSubmitConfirmation(crisisGameDef)
@@ -78,6 +76,13 @@ export {
   getCrisisDashboard,
 } from './crisisRound'
 
+// ── Slice 5: bots. triggerMatching is the CHAINED matcher (human groups THEN bot-fill the
+// remainder to 3) — deployed under the name the shared "Match" button calls. Both bot
+// runners share ONE decide() (Slice 1): the server seat-filler here + the browser robot
+// driver (games/crisis/bot/robot-driver.mjs). Crisis is consumer #2 of 3 — not extracted.
+export { triggerMatching, fillRemainderWithBots } from './matchWithBots'
+export { runBotActionsTask, runBotActionsForTest } from './botRunner'
+
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
 
 const CORS_ORIGINS = new Set(['https://crisis.mygames.live'])
@@ -93,5 +98,5 @@ export const health = onRequest((req, res) => {
   res.json({ ok: true, game: 'crisis' })
 })
 
-// Emulator-only dev seed (LOCKED — 404 unless FUNCTIONS_EMULATOR==='true').
-export { seedGroupForTest } from './seedFunctions'
+// Emulator-only dev seeds (LOCKED — 404 unless FUNCTIONS_EMULATOR==='true').
+export { seedGroupForTest, seedRosterForTest } from './seedFunctions'
