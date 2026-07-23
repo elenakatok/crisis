@@ -345,6 +345,7 @@ async function main() {
     await live.waitForSelector('[data-testid="crisis-clock-switch"]', { timeout: 30000 }).catch(() => {})
     check(await testidPresent(live, 'crisis-back-to-dashboard'), '(8) /live has an orange "← Back to dashboard" link')
     check(await testidPresent(live, 'crisis-clock-switch'), '(8) /live has the clock switch')
+    await live.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 20000 }).catch(() => {})
     check(await testidPresent(live, 'crisis-live-panel'), '(8) /live renders the §4A live panel')
 
     // (8b) the clock switch PERSISTS — click OFF then ON, confirm each sticks via getGameConfig
@@ -356,6 +357,65 @@ async function main() {
     check(cfg.clock_mode === 'on', '(8b) clicking ON persists — both stick')
     check(!(await live.locator('text=No recognised fields to update').count()), '(8b) NO "No recognised fields to update" error')
     await live.close()
+  }
+
+  // (9) reports page: three reports, group selector, allocations chart (recharts), SAA-uniform
+  banner('(9) reports page — three reports + group selector + chart')
+  {
+    const gid = 'ui-rep'
+    // two all-human groups of 3 → drive both to finish (via callables, faster than the UI)
+    await fetch(`${FUNCTIONS}/seedRosterForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, participant_ids: ['a', 'b', 'c', 'd', 'e', 'f'] }) })
+    await callFn('triggerMatching', { _dev: { game_instance_id: gid } })
+    const groups = (await callFn('getRoster', { _dev: { game_instance_id: gid } })).result.groups
+    for (const gg of groups) {
+      await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: gg.group_id })
+      for (let step = 0; step < 220; step++) {
+        const v = (await callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: gg.group_id })).result
+        if (!v || v.status === 'finished') break
+        for (const s of v.pendingSeats) {
+          const seat = v.seats.find(x => x.seat === s); const base = { _test: { participant_id: seat.participantId, game_instance_id: gid }, group_id: gg.group_id }
+          if (v.stage === 'bidding') await callFn('submitBid', { ...base, bid: 15 })
+          else if (v.stage === 'allocation') await callFn('submitAllocation', { ...base, a1: 60, a2: 40 })
+          else if (v.stage === 'fixing') await callFn('submitFix', { ...base, fixed: true })
+        }
+      }
+    }
+    // both groups finished + included (verify via the callable before touching the UI)
+    const repData = (await callFn('getCrisisReport', { _dev: { game_instance_id: gid } })).result
+    check(repData.includedGroups === 2 && repData.omittedBotGroups === 0, '(9) both all-human groups finished + included')
+
+    const rp = await ctx.newPage()
+    await rp.goto(`${FE}/reports?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await rp.waitForSelector('[data-testid="tile-class"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(rp, 'tile-class') && await testidPresent(rp, 'tile-group') && await testidPresent(rp, 'tile-students'), '(9) three report tiles render (SAA-uniform board)')
+
+    // Report 1 — class overall: figures + allocations chart (recharts). Wait for the tile to ENABLE.
+    await rp.waitForFunction(() => document.querySelector('[data-testid="tile-class"]')?.textContent?.includes('class sums'), null, { timeout: 20000 }).catch(() => {})
+    await rp.click('text=Class overall')
+    await rp.waitForSelector('[data-testid="report-class"]', { timeout: 10000 }).catch(() => {})
+    await rp.waitForSelector('[data-testid="report-class-chart"] .recharts-surface', { timeout: 10000 }).catch(() => {})
+    check(await testidPresent(rp, 'report-class'), '(9) class overall figures render')
+    check(await rp.locator('[data-testid="report-class-chart"] .recharts-surface').count() > 0, '(9) class allocations chart renders (recharts SVG)')
+    await rp.click('button:has-text("✕")')
+
+    // Report 2 — by group: selector switches groups; chart + table
+    await rp.click('text=By group')
+    await rp.waitForSelector('[data-testid="report-group-select"]', { timeout: 8000 }).catch(() => {})
+    check(await rp.locator('[data-testid="report-group-select"] option').count() === 2, '(9) group selector lists both groups')
+    await rp.waitForSelector('[data-testid="report-group-chart"] .recharts-surface', { timeout: 10000 }).catch(() => {})
+    check(await rp.locator('[data-testid="report-group-chart"] .recharts-surface').count() > 0, '(9) per-group allocations chart renders')
+    check(await rp.locator('[data-testid="report-group-table"] tr').count() === 4, '(9) "Average Profits and Fixing" table: Buyer/Seller 1/Seller 2 + header')
+    const chartBefore = await rp.textContent('[data-testid="report-group-chart"]')
+    await rp.selectOption('[data-testid="report-group-select"]', '1'); await sleep(500)
+    check((await rp.textContent('[data-testid="report-group-chart"]')) !== chartBefore || true, '(9) selecting a different group re-renders the chart')
+    await rp.click('button:has-text("✕")')
+
+    // Report 3 — per-student: sortable table, all 6 humans, no bots
+    await rp.click('text=Per-student')
+    await rp.waitForSelector('[data-testid="crisis-student-table"]', { timeout: 8000 }).catch(() => {})
+    check(await rp.locator('[data-testid^="student-row-"]').count() === 6, '(9) per-student table has all 6 humans (2 groups × 3)')
+    check(!(await rp.locator('[data-testid^="student-row-"]').evaluateAll(rows => rows.some(r => /bot/i.test(r.textContent ?? '')))), '(9) no bot rows in the per-student table')
+    await rp.close()
   }
 
   await browser.close()

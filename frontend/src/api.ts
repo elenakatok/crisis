@@ -181,6 +181,47 @@ export const getCrisisDashboard = () =>
 export const openRound = (groupId: string) =>
   callFn<{ ok: boolean; round: number; stage: Stage; clockEnabled: boolean }>('openRound', { group_id: groupId })
 
+// ── Reports (Slice 7) — read-only, from the frozen finished state; bots excluded ──
+
+export type ChartPoint = { period: number; s1Units: number; s2Units: number; s1Price: number; s2Price: number }
+
+export type ReportStudentRow = {
+  participantId: string
+  name: string
+  groupNumber: number
+  role: 'Buyer' | 'Seller 1' | 'Seller 2'
+  averageBid: number
+  proportionFixed: number | null
+  averageAllocation: number | null
+  profit: number
+}
+
+export type ReportGroup = {
+  groupId: string
+  groupNumber: number
+  names: { buyer: string; seller1: string; seller2: string }
+  chart: ChartPoint[]
+  table: { buyerProfit: number; seller1Profit: number; seller2Profit: number; seller1FixPct: number | null; seller2FixPct: number | null }
+}
+
+export type CrisisReport = {
+  ok: boolean
+  classSummary: {
+    totalBuyerProfit: number
+    totalSellerProfit: number
+    averageBid: number
+    averageWinningAllocation: number
+    pctCrisesFixed: number | null
+  }
+  classChart: ChartPoint[]
+  groups: ReportGroup[]
+  students: ReportStudentRow[]
+  omittedBotGroups: number
+  includedGroups: number
+}
+
+export const getCrisisReport = () => callFn<CrisisReport>('getCrisisReport', {})
+
 // ── Clock-mode control (per-instance setting; instructor sets before starting) ──
 export type GameConfig = { ok: boolean; clock_mode?: string; round_seconds?: number; num_rounds?: number }
 export const getGameConfig = () => callFn<GameConfig>('getGameConfig', {})

@@ -700,6 +700,66 @@ async function main() {
     check(oOn.result.clockEnabled === true, '(S3) ON honoured at openRound (clockEnabled true)')
   }
 
+  // ══ SLICE 7 — REPORTS (getCrisisReport, the callable the Reports page invokes) ══
+  const report = (gid) => callFn('getCrisisReport', asDev(gid, {}))
+  const sumOf = (a) => a.reduce((x, y) => x + y, 0)
+
+  // (R1) known dataset: bids 12/20, allocation 80/20 (ASYMMETRIC), S1 always fixes, S2 never
+  banner('(R1) reports on a KNOWN dataset — sums, weighted buyer price, fixing %')
+  {
+    const gid = 'rep1'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    for (let rd = 1; rd <= 10; rd++) await playRound(gid, rm, { b1: 12, b2: 20, a1: 80, a2: 20, f1: true, f2: false })
+    const hist = (await iview(gid)).result.history
+    const rep = (await report(gid)).result
+    const S1 = rep.students.find(s => s.role === 'Seller 1'), S2 = rep.students.find(s => s.role === 'Seller 2'), B = rep.students.find(s => s.role === 'Buyer')
+    const faced = hist.filter(h => h.crisisOccurred).length
+    const noCrisis = hist.filter(h => !h.crisisOccurred).length
+
+    check(rep.includedGroups === 1 && rep.omittedBotGroups === 0, '(R1) all-human group included')
+    check(Math.abs(B.averageBid - 13.6) < 1e-9, '(R1) buyer allocation-weighted avg price = 13.6 (NOT the unweighted mean 16)')
+    check(Math.abs(rep.classSummary.averageBid - 16) < 1e-9, '(R1) class average bid = 16 (grand mean of 12 & 20)')
+    check(S1.averageBid === 12 && S2.averageBid === 20, '(R1) seller average bids 12 / 20')
+    check(S1.averageAllocation === 80 && S2.averageAllocation === 20, '(R1) seller average allocations 80 / 20')
+    check(S1.proportionFixed === (faced > 0 ? 1 : null), '(R1) Seller 1 fixed ALL crises → 100% (denominator = crises FACED)')
+    check(S2.proportionFixed === (faced > 0 ? 0 : null), '(R1) Seller 2 fixed NONE → 0%')
+    check(noCrisis === 0 || S1.proportionFixed === 1, '(R1) a no-crisis round does NOT dilute the fixing denominator')
+    // class figures are SUMS (verified differentially against the resolved history)
+    check(rep.classSummary.totalBuyerProfit === sumOf(hist.map(h => h.profits.buyer)), '(R1) class total BUYER profit = SUM over rounds')
+    check(rep.classSummary.totalSellerProfit === sumOf(hist.map(h => h.profits.seller1 + h.profits.seller2)), '(R1) class total SELLER profit = SUM (both sellers)')
+    check(rep.groups[0].table.buyerProfit === sumOf(hist.map(h => h.profits.buyer)), '(R1) group table buyer profit correct')
+  }
+
+  // (R1b) mixed fixing — a seller who fixes SOME crises → partial %, computed differentially
+  banner('(R1b) partial fixing rate (fixes some crises)')
+  {
+    const gid = 'rep1b'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    for (let rd = 1; rd <= 10; rd++) await playRound(gid, rm, { b1: 15, b2: 15, a1: 50, a2: 50, f1: rd % 2 === 0, f2: false })
+    const hist = (await iview(gid)).result.history
+    const rep = (await report(gid)).result
+    const S1 = rep.students.find(s => s.role === 'Seller 1')
+    // expected S1 fixing = (crisis rounds where round is even) / (crisis rounds), units always 50
+    let faced = 0, fixed = 0
+    for (const h of hist) if (h.crisisOccurred) { faced++; if (h.round % 2 === 0) fixed++ }
+    const expected = faced === 0 ? null : fixed / faced
+    check(S1.proportionFixed === expected, `(R1b) Seller 1 partial fixing rate correct (${fixed}/${faced})`)
+  }
+
+  // (R2) bots excluded entirely — a bot-filled group is OMITTED from all reports
+  banner('(R2) bots excluded — bot-filled group omitted entirely')
+  {
+    const gid = 'rep2'; await seedRoster(gid, ['h1', 'h2', 'h3', 'h4']); await match(gid)
+    const groups = (await rosterOf(gid)).result.groups
+    for (const gg of groups) { await openG(gid, gg.group_id, 1); await driveMixedToFinish(gid, gg.group_id) }
+    const rep = (await report(gid)).result
+    check(rep.includedGroups === 1 && rep.omittedBotGroups === 1, '(R2) 1 human group included, 1 bot group omitted')
+    check(rep.groups.length === 1, '(R2) only the all-human group in the report')
+    check(rep.students.length === 3, '(R2) exactly the 3 humans of the all-human group')
+    check(!rep.students.some(s => s.participantId.startsWith('bot_')), '(R2) no bot rows anywhere')
+    check(!rep.students.some(s => s.participantId === 'h4'), '(R2) the human IN the bot group is excluded (whole group omitted)')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

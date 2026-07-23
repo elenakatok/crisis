@@ -61,6 +61,7 @@ export const submitKnowledgeCheck               = makeSubmitKnowledgeCheck(crisi
 export const submitStaticKnowledgeCheckQuestion = makeSubmitStaticKnowledgeCheckQuestion(crisisGameDef)
 export const getInfoUrls                        = makeGetInfoUrls(crisisGameDef)
 export { getReportData } from './getReportData'
+export { getCrisisReport } from './getCrisisReport'
 export { scoreAndRecord } from './scoreAndRecord'
 
 // ── Slice 2: the round loop + clock (server-authoritative Firestore shell over the
