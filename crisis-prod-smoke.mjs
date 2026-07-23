@@ -157,6 +157,8 @@ async function main() {
   check(rowCounts.every(c => c === 10), `history has 10 rows on every seat (${rowCounts.join('/')})`)
   const hists = await Promise.all(pages.map(p => p.textContent('[data-testid="crisis-history"]')))
   check(hists.every(h => h === hists[0]), 'history byte-identical across all three seats (§1.1)')
+  const buyerCells = await Promise.all(pages.map(p => p.locator('[data-testid^="crisis-buyer-profit-"]').count()))
+  check(buyerCells.every(c => c === 10), 'Buyer\'s Profit column renders on every seat (per-round, all 10 rows)')
   const totals = await Promise.all(pages.map(p => p.textContent('[data-testid="crisis-total-profit"]').catch(() => null)))
   console.log(`  total profits shown: ${totals.join(' / ')}`)
 

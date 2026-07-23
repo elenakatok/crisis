@@ -174,6 +174,15 @@ async function main() {
     const rowCounts = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-history-row-"]').count()))
     check(rowCounts.every(c => c === 10), '(1) history has 10 rows on every seat')
 
+    // Buyer's Profit column present on EVERY seat (no private info, §1.1) + no horizontal scroll
+    const buyerCells = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-buyer-profit-"]').count()))
+    check(buyerCells.every(c => c === 10), '(1) Buyer\'s Profit column renders on every seat (10 rows)')
+    const fits = await Promise.all(pages.map(p => p.page.evaluate(() => {
+      const t = document.querySelector('[data-testid="crisis-history"]'); if (!t || !t.parentElement) return false
+      return t.parentElement.scrollWidth <= t.parentElement.clientWidth + 1
+    })))
+    check(fits.every(Boolean), '(1) history table fits without horizontal scroll on every seat')
+
     for (const p of pages) await p.page.close()
   }
 
