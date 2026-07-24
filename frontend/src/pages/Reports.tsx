@@ -73,7 +73,7 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
         <thead><tr>
           {head('name', 'Name')}{head('groupNumber', 'Group')}{head('role', 'Role')}
           {head('averageBid', 'Average bid')}{head('proportionFixed', 'Proportion fixed')}
-          {head('averageAllocation', 'Average allocation')}{head('timeouts', 'Timeouts')}{head('profit', 'Profit')}
+          {head('averageAllocation', 'Average allocation')}{head('timeouts', 'Stages missed')}{head('profit', 'Profit')}
         </tr></thead>
         <tbody>
           {sorted.map(r => (
