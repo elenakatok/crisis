@@ -35,8 +35,9 @@ const crisisConfigSections = [
     id: 'contact',
     title: 'Instructor contact',
     fields: [
-      // Auto-populated from the classroom course owner on each roster sync; this manual entry is a
-      // fallback for edge cases (e.g. no course owner resolved). The synced value takes precedence.
+      // Auto-populated from the classroom course owner on each roster sync. Leave blank to use that
+      // synced address; set it to OVERRIDE (a co-teacher's address, or a correction) — a manual
+      // value here wins over the synced one.
       { key: 'instructor_email', label: 'Instructor email (override — normally set automatically)', kind: 'string' as const, placeholder: 'you@university.edu' },
     ],
   },

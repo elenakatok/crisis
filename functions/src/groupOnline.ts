@@ -327,12 +327,12 @@ export const flagGroup = onCall(CORS, async (request: CallableRequest) => {
     return false
   })
 
-  // Instructor email precedence (instructor-email auto-populate): the SYNCED value on the instance
-  // doc (course owner, from getCourseRoster) wins; the Settings config value is the manual override
-  // for edge cases (e.g. the owner never resolved); blank To: with Cc-group if neither is set.
+  // Instructor email precedence (instructor-email auto-populate): the MANUAL Settings value wins
+  // when set (a real override — a co-teacher's address, or a correction), else the SYNCED value on
+  // the instance doc (course owner, from getCourseRoster); blank To: with Cc-group if neither is set.
   const syncedEmail = String(instanceSnap.data()?.['instructor_email'] ?? '').trim()
   const overrideEmail = String(configSnap.data()?.['instructor_email'] ?? '').trim()
-  const instructorEmail = syncedEmail || overrideEmail
+  const instructorEmail = overrideEmail || syncedEmail
   return { ok: true as const, already_flagged: already, group_number: groupNumber, instructor_email: instructorEmail || null }
 })
 

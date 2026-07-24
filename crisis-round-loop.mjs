@@ -1485,7 +1485,7 @@ async function main() {
   // so we flag once then vary the two sources on the same group.
   const writeInstance = (gid, obj) => { const fields = {}; for (const [k, v] of Object.entries(obj)) fields[k] = { stringValue: v }; return fetch(`${FIRESTORE}/game_instances/${gid}`, { method: 'PATCH', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) }) }
   const readInstance = (gid) => fetch(`${FIRESTORE}/game_instances/${gid}`, { headers: { Authorization: 'Bearer owner' } }).then(r => r.ok ? r.json() : null)
-  banner('(O20) instructor-email — flag mailto precedence (synced → Settings override → blank)')
+  banner('(O20) instructor-email — flag mailto precedence (Settings override → synced → blank)')
   {
     const gid = 'ie-precedence'
     await fsWrite(gid, 'config/main', { clock_mode: 'off' })
@@ -1496,17 +1496,17 @@ async function main() {
     let r = await flagFn(gid, reporter)
     check(r.ok && r.result.instructor_email === null, '(O20) neither set → instructor_email null (blank To:, Cc-group stays)')
 
-    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: 'settings@uni.edu' })
-    r = await flagFn(gid, reporter)
-    check(r.result.instructor_email === 'settings@uni.edu', '(O20) Settings override used when there is no synced value')
-
     await writeInstance(gid, { instructor_email: 'owner@uni.edu' })
     r = await flagFn(gid, reporter)
-    check(r.result.instructor_email === 'owner@uni.edu', '(O20) synced instance value WINS over the Settings override')
+    check(r.result.instructor_email === 'owner@uni.edu', '(O20) synced value used when there is no manual override')
+
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: 'settings@uni.edu' })
+    r = await flagFn(gid, reporter)
+    check(r.result.instructor_email === 'settings@uni.edu', '(O20) manual Settings override WINS over the synced value')
 
     await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: '' })
     r = await flagFn(gid, reporter)
-    check(r.result.instructor_email === 'owner@uni.edu', '(O20) synced value used when the override is blank')
+    check(r.result.instructor_email === 'owner@uni.edu', '(O20) falls back to the synced value when the override is cleared')
   }
 
   // (O21) instructor-email auto-populate — syncRoster denormalizes the course owner's email onto the
