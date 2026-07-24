@@ -31,6 +31,15 @@ const crisisConfigSections = [
       { key: 'clock_mode',    label: 'Clock: "on" (classroom) or "off" (online play)', kind: 'string' as const, placeholder: 'on' },
     ],
   },
+  {
+    id: 'contact',
+    title: 'Instructor contact',
+    fields: [
+      // Auto-populated from the classroom course owner on each roster sync; this manual entry is a
+      // fallback for edge cases (e.g. no course owner resolved). The synced value takes precedence.
+      { key: 'instructor_email', label: 'Instructor email (override — normally set automatically)', kind: 'string' as const, placeholder: 'you@university.edu' },
+    ],
+  },
 ]
 
 export default function App() {

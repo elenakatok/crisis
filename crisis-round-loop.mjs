@@ -1480,6 +1480,74 @@ async function main() {
     check(o.ok && o.result.ok, '(O19) the group with the ex-latecomer starts and plays')
   }
 
+  // (O20) instructor-email auto-populate — the flag mailto precedence: synced (instance doc) →
+  // Settings override (config) → blank. flagGroup recomputes the email each call (after the tx),
+  // so we flag once then vary the two sources on the same group.
+  const writeInstance = (gid, obj) => { const fields = {}; for (const [k, v] of Object.entries(obj)) fields[k] = { stringValue: v }; return fetch(`${FIRESTORE}/game_instances/${gid}`, { method: 'PATCH', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) }) }
+  const readInstance = (gid) => fetch(`${FIRESTORE}/game_instances/${gid}`, { headers: { Authorization: 'Bearer owner' } }).then(r => r.ok ? r.json() : null)
+  banner('(O20) instructor-email — flag mailto precedence (synced → Settings override → blank)')
+  {
+    const gid = 'ie-precedence'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `ie${i}`, `IE ${i}`, `ie${i}@ex.edu`)
+    await groupOnline(gid)
+    const reporter = (await onlineGroups(gid)).groups[0].members[0].participant_id
+
+    let r = await flagFn(gid, reporter)
+    check(r.ok && r.result.instructor_email === null, '(O20) neither set → instructor_email null (blank To:, Cc-group stays)')
+
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: 'settings@uni.edu' })
+    r = await flagFn(gid, reporter)
+    check(r.result.instructor_email === 'settings@uni.edu', '(O20) Settings override used when there is no synced value')
+
+    await writeInstance(gid, { instructor_email: 'owner@uni.edu' })
+    r = await flagFn(gid, reporter)
+    check(r.result.instructor_email === 'owner@uni.edu', '(O20) synced instance value WINS over the Settings override')
+
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: '' })
+    r = await flagFn(gid, reporter)
+    check(r.result.instructor_email === 'owner@uni.edu', '(O20) synced value used when the override is blank')
+  }
+
+  // (O21) instructor-email auto-populate — syncRoster denormalizes the course owner's email onto the
+  // instance doc (via a mock classroom roster), and degrades cleanly when the owner does not resolve.
+  banner('(O21) instructor-email — syncRoster stores the synced email; absent-owner degrades')
+  {
+    const ROSTER_PORT = 5097
+    let ownerEmail = 'owner-synced@uni.edu'
+    const rosterMock = http.createServer((req, r) => {
+      let b = ''; req.on('data', c => (b += c))
+      req.on('end', () => { r.writeHead(200, { 'Content-Type': 'application/json' }); r.end(JSON.stringify({ ok: true, participants: [{ participant_id: 'rp1', name: 'Roster One', email: 'rp1@ex.edu', external_id: null }], ...(ownerEmail ? { instructor_email: ownerEmail } : {}) })) })
+    })
+    await new Promise(res => rosterMock.listen(ROSTER_PORT, '127.0.0.1', res))
+    const rosterUrl = `http://localhost:${ROSTER_PORT}`
+    try {
+      const gid = 'ie-sync'
+      await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+      const sr = await callFn('syncRoster', { _dev: { game_instance_id: gid, roster_url: rosterUrl, callback_secret: 'test' } })
+      check(sr.ok && sr.result.synced >= 1, '(O21) syncRoster ok + participants synced (shared handler still delegated)')
+      const inst = await readInstance(gid)
+      check(inst?.fields?.instructor_email?.stringValue === 'owner-synced@uni.edu', '(O21) syncRoster denormalized instructor_email onto the instance doc')
+      // and the flag mailto now uses it (end-to-end)
+      for (let i = 0; i < 3; i++) await seedOnline(gid, `sy${i}`, `SY ${i}`, `sy${i}@ex.edu`)
+      await groupOnline(gid)
+      const reporter = (await onlineGroups(gid)).groups[0].members[0].participant_id
+      const fr = await flagFn(gid, reporter)
+      check(fr.result.instructor_email === 'owner-synced@uni.edu', '(O21) the flag mailto uses the synced email end-to-end')
+
+      // absent owner → the mock omits instructor_email → the instance doc is NOT stamped
+      ownerEmail = ''
+      const gid2 = 'ie-sync-noowner'
+      await fsWrite(gid2, 'config/main', { clock_mode: 'off' })
+      const sr2 = await callFn('syncRoster', { _dev: { game_instance_id: gid2, roster_url: rosterUrl, callback_secret: 'test' } })
+      check(sr2.ok, '(O21) syncRoster still ok when the owner does not resolve')
+      const inst2 = await readInstance(gid2)
+      check(!inst2?.fields?.instructor_email, '(O21) absent owner → no instructor_email on the instance doc (degrades to current behavior)')
+    } finally {
+      rosterMock.close()
+    }
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

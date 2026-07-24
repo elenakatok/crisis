@@ -8,7 +8,6 @@ import {
   makeGenerateAttendanceCode,
   makeVerifyAttendanceCode,
   makeGetRoster,
-  makeSyncRoster,
   makeStartNegotiation,
   makeSubmitLeadOutcome,
   makeSubmitConfirmation,
@@ -46,7 +45,9 @@ export const confirmReady           = makeConfirmReady(crisisGameDef)
 export const generateAttendanceCode = makeGenerateAttendanceCode(crisisGameDef)
 export const verifyAttendanceCode   = makeVerifyAttendanceCode(crisisGameDef)
 export const getRoster              = makeGetRoster(crisisGameDef)
-export const syncRoster             = makeSyncRoster(crisisGameDef)
+// syncRoster is a Crisis WRAPPER (delegates participants to the shared factory, then denormalizes
+// the course owner's instructor_email onto the instance doc). See ./syncRoster.
+export { syncRoster } from './syncRoster'
 export const startNegotiation           = makeStartNegotiation(crisisGameDef)
 export const submitLeadOutcome          = makeSubmitLeadOutcome(crisisGameDef)
 export const submitConfirmation         = makeSubmitConfirmation(crisisGameDef)

@@ -291,10 +291,11 @@ export const flagGroup = onCall(CORS, async (request: CallableRequest) => {
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
-  const [pSnap, configSnap, groupsSnap] = await Promise.all([
+  const [pSnap, configSnap, groupsSnap, instanceSnap] = await Promise.all([
     instanceRef.collection('participants').doc(participantId).get(),
     instanceRef.collection('config').doc('main').get(),
     instanceRef.collection('groups').get(),
+    instanceRef.get(),
   ])
   // Online-only (the button is only shown online; this is the server guard).
   if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
@@ -326,7 +327,12 @@ export const flagGroup = onCall(CORS, async (request: CallableRequest) => {
     return false
   })
 
-  const instructorEmail = String(configSnap.data()?.['instructor_email'] ?? '').trim()
+  // Instructor email precedence (instructor-email auto-populate): the SYNCED value on the instance
+  // doc (course owner, from getCourseRoster) wins; the Settings config value is the manual override
+  // for edge cases (e.g. the owner never resolved); blank To: with Cc-group if neither is set.
+  const syncedEmail = String(instanceSnap.data()?.['instructor_email'] ?? '').trim()
+  const overrideEmail = String(configSnap.data()?.['instructor_email'] ?? '').trim()
+  const instructorEmail = syncedEmail || overrideEmail
   return { ok: true as const, already_flagged: already, group_number: groupNumber, instructor_email: instructorEmail || null }
 })
 
