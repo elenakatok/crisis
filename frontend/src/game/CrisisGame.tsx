@@ -7,6 +7,7 @@ import {
 import { CRISIS, checkAllocation } from './constants'
 import HistoryTable from './HistoryTable'
 import ClockBar from './ClockBar'
+import OnlineMembersStrip from './OnlineMembersStrip'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CrisisGame — the three decision screens + shared history table (Slice 3). Polls
@@ -36,10 +37,12 @@ const primaryBtn: React.CSSProperties = { padding: '0.5rem 1.1rem', fontSize: '1
 const numInput: React.CSSProperties = { fontSize: '1.4rem', width: '8rem', padding: '0.35rem 0.5rem', fontFamily: 'monospace' }
 
 export default function CrisisGame({
+  participantId,
+  gameInstanceId,
   groupId,
 }: {
-  // participantId / gameInstanceId are supplied by Play (session context) but the game
-  // reads/acts purely by group_id — auth rides the session Bearer.
+  // The game reads/acts purely by group_id — auth rides the session Bearer. participantId /
+  // gameInstanceId are used ONLY by the online members strip on the pre-round screen.
   participantId: string
   gameInstanceId: string
   groupId: string
@@ -86,13 +89,17 @@ export default function CrisisGame({
   // ── pre-game: instructor hasn't started the round yet ──────────────────────────
   if (notStarted || view === null) {
     return (
-      <main style={page}>
-        <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
-        <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
-          Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
-          assigned when it begins. Keep this tab open.
-        </p>
-      </main>
+      <>
+        {/* Online only + pre-round-1 only; renders null in classroom and once the round starts. */}
+        <OnlineMembersStrip participantId={participantId} gameInstanceId={gameInstanceId} groupId={groupId} />
+        <main style={page}>
+          <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
+          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
+            Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
+            assigned when it begins. Keep this tab open.
+          </p>
+        </main>
+      </>
     )
   }
 

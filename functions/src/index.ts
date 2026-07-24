@@ -84,6 +84,12 @@ export {
 export { triggerMatching, fillRemainderWithBots } from './matchWithBots'
 export { runBotActionsTask, runBotActionsForTest } from './botRunner'
 
+// ── Online mode (Slice O1): deploy-time pre-grouping + group reveal (Online_Matching_Spec).
+// ADDITIVE — classroom matching (triggerMatching, above) is unchanged. groupParticipantsOnline
+// forms random groups of 3 from the roster when clock_mode='off'; recordLogin stamps
+// last_login_at + returns the mode; getOnlineGroups feeds the instructor grouping panel.
+export { groupParticipantsOnline, recordLogin, getOnlineGroups } from './groupOnline'
+
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
 
 const CORS_ORIGINS = new Set(['https://crisis.mygames.live'])

@@ -60,6 +60,13 @@ export const confirmReady = (args: CallArgs) =>
 export const verifyAttendanceCode = (args: CallArgs, code: string) =>
   callFn<{ ok: boolean }>('verifyAttendanceCode', { ...args, code })
 
+// ── Online mode (Slice O1) ──────────────────────────────────────────────────────
+// recordLogin: stamps last_login_at server-side AND returns clock_mode so the UI can
+// pick online vs classroom routing (config is server-only-readable; the client cannot
+// read the setting directly). Called once on session establishment, both modes.
+export const recordLogin = (args: CallArgs = {} as BearerArgs) =>
+  callFn<{ ok: boolean; clock_mode: string }>('recordLogin', args)
+
 // ── Student content callables ─────────────────────────────────────────────────
 // The shared @mygames/game-ui components (InfoPage/KnowledgeCheck/PrepQuestions, via
 // getInfoUrls) usually invoke these directly through httpsCallable; they are exposed +
@@ -283,6 +290,19 @@ export const triggerMatching = () =>
 
 export const submitInstructorOutcome = (groupId: string, outcome: OutcomeFields | null) =>
   callFn<{ ok: boolean }>('submitInstructorOutcome', { group_id: groupId, outcome })
+
+// ── Online-mode instructor grouping (Slice O1) ──────────────────────────────────
+export type OnlineMember = { participant_id: string; display_name: string; email: string | null }
+export type OnlineGroup  = { group_id: string; members: OnlineMember[]; size: number; locked: boolean }
+
+/** Pre-form random groups of 3 from the roster (online mode; re-runnable until first lock). */
+export const groupParticipantsOnline = () =>
+  callFn<{ ok: boolean; groups: number; full_groups: number; short_group_size: number | null; total_humans: number }>(
+    'groupParticipantsOnline', {})
+
+/** clock_mode + the online groups (with members) for the grouping panel. */
+export const getOnlineGroups = () =>
+  callFn<{ ok: boolean; clock_mode: string; groups: OnlineGroup[] }>('getOnlineGroups', {})
 
 // Type re-export so pages can annotate outcome payloads without a second import.
 export type { OutcomeSchema }

@@ -4,6 +4,7 @@ import { auth, functions, rtdb } from '../firebase'
 import { submitInstructorOutcome } from '../api'
 import { crisisConfig } from '../gameConfig'
 import CrisisLiveSummary from './CrisisLiveSummary'
+import OnlineGroupingPanel from '../game/OnlineGroupingPanel'
 
 // ── Role labels from game config (SINGLE matching role — `player`) ─────────────
 
@@ -72,6 +73,8 @@ export default function InstructorDashboard() {
       {/* UNIFORM with SAA: a summary panel portals to the TOP of the shared <main> (under
           the buttons, above the heading) with an orange "Live view →" link, same window. */}
       <CrisisLiveSummary />
+      {/* Online mode only (clock_mode='off'); renders null in classroom mode. */}
+      <OnlineGroupingPanel />
       <SharedDashboard
         title="Instructor Dashboard — Crisis"
         roleLabels={roleLabels}

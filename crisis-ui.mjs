@@ -418,6 +418,73 @@ async function main() {
     await rp.close()
   }
 
+  // (10) ONLINE MODE — login lands on the reveal (no attendance-code screen), members strip,
+  //      then a round plays with the clock off. Proves the online routing end-to-end.
+  banner('(10) online mode — reveal on login (no code screen), members strip, play clock-off')
+  {
+    const seedOnline = (gid, pid, name, email, extra = {}) => fsWrite(gid, `participants/${pid}`, {
+      participant_id: pid, game_instance_id: gid, role: 'player', is_bot: false, name, email, ...extra,
+    })
+
+    const gid = 'ui-online'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    const roster = [
+      ['w1', 'Ada Online', 'ada@ex.edu'],
+      ['w2', 'Ben Online', 'ben@ex.edu'],
+      ['w3', 'Cy Online',  'cy@ex.edu'],
+    ]
+    for (const [pid, name, email] of roster) await seedOnline(gid, pid, name, email, { prep_status: 'complete' })
+    const gr = await callFn('groupParticipantsOnline', { _dev: { game_instance_id: gid } })
+    check(gr.ok && gr.result.full_groups === 1, '(10) groupParticipantsOnline formed one full group')
+    const groupId = (await callFn('getOnlineGroups', { _dev: { game_instance_id: gid } })).result.groups[0].group_id
+
+    // student w1 logs in → the reveal, NOT the attendance-code screen
+    const p1 = await ctx.newPage()
+    await p1.goto(studentUrl(gid, 'w1'))
+    await p1.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(p1, 'crisis-online-reveal'), '(10) online login lands on the group reveal')
+    check(!(await testidPresent(p1, 'crisis-online-holding')), '(10) not the holding screen (already grouped)')
+    const revealText = await p1.textContent('[data-testid="crisis-online-reveal"]')
+    check(/Ada Online/.test(revealText) && /Ben Online/.test(revealText) && /Cy Online/.test(revealText), '(10) reveal shows all three member names')
+    check(await p1.locator('[data-testid="crisis-reveal-email"]').count() === 3, '(10) reveal shows all three member emails')
+    const mailto = await p1.locator('[data-testid="crisis-reveal-email"]').first().getAttribute('href')
+    check(/^mailto:.+@/.test(mailto || ''), '(10) member email is a mailto: link')
+
+    // continue → pre-game waiting screen + persistent members strip
+    await p1.click('[data-testid="crisis-reveal-continue"]')
+    await p1.waitForSelector('[data-testid="crisis-waiting-start"]', { timeout: 15000 }).catch(() => {})
+    check(await testidPresent(p1, 'crisis-waiting-start'), '(10) continue → pre-game waiting screen (no code screen anywhere)')
+    // the strip renders once its group-doc snapshot resolves (a tick after the screen appears)
+    await p1.waitForSelector('[data-testid="crisis-members-strip"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(p1, 'crisis-members-strip'), '(10) persistent members strip shows before round 1')
+
+    // instructor opens the round (clock off) → student plays; strip disappears once round active
+    await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: groupId })
+    await p1.waitForFunction(() => !!window.__crisisState, null, { timeout: 20000 }).catch(() => {})
+    const st = await stateOf(p1)
+    check(st && ['buyer', 'seller1', 'seller2'].includes(st.role), '(10) round active online → a seat/role is assigned')
+    check(st && st.clockEnabled === false && st.stageDeadlineMs === null, '(10) round runs with the clock OFF (online)')
+    await sleep(800)
+    check(!(await testidPresent(p1, 'crisis-members-strip')), '(10) members strip hidden once round 1 is active')
+    await p1.close()
+
+    // (10b) reveal PRECEDES the KC flow: a grouped student whose prep is NOT complete still
+    //       sees the reveal first, and continue drops into the shared info/KC flow (not the game).
+    const gid2 = 'ui-online-kc'
+    await fsWrite(gid2, 'config/main', { clock_mode: 'off' })
+    for (const pid of ['k1', 'k2', 'k3']) await seedOnline(gid2, pid, `KC ${pid}`, `${pid}@ex.edu`) // prep_status omitted → not complete
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: gid2 } })
+    const pk = await ctx.newPage()
+    await pk.goto(studentUrl(gid2, 'k1'))
+    await pk.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(pk, 'crisis-online-reveal'), '(10b) grouped student with prep incomplete still sees the reveal first')
+    await pk.click('[data-testid="crisis-reveal-continue"]')
+    await sleep(1800)
+    check(!(await testidPresent(pk, 'crisis-online-reveal')), '(10b) continue dismisses the reveal')
+    check(!(await testidPresent(pk, 'crisis-waiting-start')), '(10b) continue lands in the info/KC flow, NOT the game (reveal precedes KC)')
+    await pk.close()
+  }
+
   await browser.close()
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)

@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { doc, getDoc } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
-import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
+import { assignRole, confirmReady, verifyAttendanceCode, recordLogin, CLASSROOM_URL } from '../api'
 import {
   useStudentSession,
   KnowledgeCheck,
@@ -17,6 +17,7 @@ import {
 } from '@mygames/game-ui'
 import type { BootstrapArgs, InfoPageLink } from '@mygames/game-ui'
 import CrisisGame from '../game/CrisisGame'
+import OnlineGroupReveal from '../game/OnlineGroupReveal'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 //
@@ -36,7 +37,12 @@ type GamePhase =
   | { name: 'confirmation' }
   | { name: 'attendance-code' }
   | { name: 'waiting-room' }
+  | { name: 'online_holding' }   // ONLINE: grouped at deploy, but the instructor hasn't grouped yet
   | { name: 'matched';         groupId: string }
+
+// The per-instance clock/mode setting. 'off' = ONLINE play (no attendance code, no waiting
+// room, group reveal on login); 'on' = CLASSROOM (unchanged). recordLogin returns this.
+type Mode = 'on' | 'off'
 
 // ── Phase routing ─────────────────────────────────────────────────────────────
 
@@ -47,30 +53,54 @@ type GetInfoUrlsResult = {
   publicLink: { label: string; url: string } | null
 }
 
-async function routeToPhase(participantId: string, gameInstanceId: string): Promise<GamePhase> {
+// Returns the underlying phase PLUS, in online mode, the group to reveal first (the reveal
+// is a gate layered in front of the phase — see the component). Classroom routing (mode 'on')
+// is BYTE-IDENTICAL to before: same branches, revealGroupId always null.
+async function routeToPhase(
+  participantId: string,
+  gameInstanceId: string,
+  mode: Mode,
+): Promise<{ phase: GamePhase; revealGroupId: string | null }> {
   const snap = await getDoc(
     doc(db, 'game_instances', gameInstanceId, 'participants', participantId),
   )
   const d = snap.data() ?? {}
 
+  // ── Underlying phase ────────────────────────────────────────────────────────
+  let phase: GamePhase
   if (d.prep_status !== 'complete') {
-    if (d.knowledge_check_score != null) return { name: 'prep' }
-    const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
-    const { data } = await fn({})
-    return {
-      name:       'info',
-      roleLabel:  data.roleLabel,
-      links:      data.links,
-      publicLink: data.publicLink ?? null,
+    // info → KC → prep is shared between both modes and unchanged.
+    if (d.knowledge_check_score != null) {
+      phase = { name: 'prep' }
+    } else {
+      const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
+      const { data } = await fn({})
+      phase = { name: 'info', roleLabel: data.roleLabel, links: data.links, publicLink: data.publicLink ?? null }
     }
+  } else if (mode === 'off') {
+    // ONLINE: no attendance code, no waiting room. Grouped → into the game; not yet → holding.
+    phase = d.group_id ? { name: 'matched', groupId: d.group_id as string } : { name: 'online_holding' }
+  } else {
+    // CLASSROOM — unchanged join routing.
+    if (!d.confirmed_ready_at)      phase = { name: 'hold' }
+    else if (!d.attendance_confirmed_at) phase = { name: 'confirmation' }
+    else if (!d.group_id)          phase = { name: 'waiting-room' }
+    else                           phase = { name: 'matched', groupId: d.group_id as string }
   }
 
-  // prep complete — join routing
-  if (!d.confirmed_ready_at)      return { name: 'hold' }
-  if (!d.attendance_confirmed_at) return { name: 'confirmation' }
-  if (!d.group_id)                return { name: 'waiting-room' }
+  // ── Online reveal gate: a pre-grouped student sees their group first, until it locks ──
+  // Only for a group formed by online grouping (it carries members[]); a group without
+  // members[] — e.g. a classroom/seeded group — never triggers the reveal.
+  let revealGroupId: string | null = null
+  if (mode === 'off' && d.group_id) {
+    const gsnap = await getDoc(doc(db, 'game_instances', gameInstanceId, 'groups', d.group_id as string))
+    const g = gsnap.exists() ? gsnap.data() : undefined
+    const isOnlineGroup = Array.isArray(g?.members)
+    const locked = g?.seats_locked_at != null
+    if (isOnlineGroup && !locked) revealGroupId = d.group_id as string
+  }
 
-  return { name: 'matched', groupId: d.group_id as string }
+  return { phase, revealGroupId }
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -82,6 +112,9 @@ export default function Play() {
   const testGid = import.meta.env.DEV ? p.get('_gid') : null
 
   const [phase, setPhase]             = useState<GamePhase>({ name: 'loading' })
+  const [mode, setMode]               = useState<Mode>('on')
+  const [revealGroupId, setRevealGroupId] = useState<string | null>(null)
+  const revealDismissed               = useRef(false)
   const [headerLinks, setHeaderLinks] = useState<InfoPageLink[] | null>(null)
   const [confError,   setConfError]   = useState<string | null>(null)
   const [confLoading, setConfLoading] = useState(false)
@@ -113,18 +146,31 @@ export default function Play() {
     let cancelled = false
 
     const run = async () => {
-      let ph: GamePhase
+      // Session establishment: stamp last_login_at (best-effort) and learn the mode. On any
+      // failure we fall back to 'on' — i.e. the unchanged classroom flow — so a transient
+      // recordLogin error never strands a classroom student.
+      let m: Mode = 'on'
       try {
-        ph = await routeToPhase(participantId, gameInstanceId)
+        const rec = await recordLogin()
+        m = rec.clock_mode === 'off' ? 'off' : 'on'
+      } catch { /* best-effort; default to classroom routing */ }
+      if (cancelled) return
+      setMode(m)
+
+      let res: { phase: GamePhase; revealGroupId: string | null }
+      try {
+        res = await routeToPhase(participantId, gameInstanceId, m)
       } catch (err) {
         if (!cancelled) setPhase({ name: 'error', message: err instanceof Error ? err.message : 'Failed to load session.' })
         return
       }
       if (cancelled) return
-      setPhase(ph)
+      setPhase(res.phase)
+      // Online reveal gate — show once per session, until dismissed or the group locks.
+      setRevealGroupId(m === 'off' && res.revealGroupId && !revealDismissed.current ? res.revealGroupId : null)
 
-      if (ph.name === 'info') {
-        if (!cancelled) setHeaderLinks(ph.links)
+      if (res.phase.name === 'info') {
+        if (!cancelled) setHeaderLinks(res.phase.links)
       } else {
         const fn = httpsCallable<object, GetInfoUrlsResult>(functions, 'getInfoUrls')
         fn({}).then(({ data }) => { if (!cancelled) setHeaderLinks(data.links) }).catch(() => {})
@@ -133,6 +179,17 @@ export default function Play() {
 
     void run()
     return () => { cancelled = true }
+  }, [session])
+
+  // Online-only: re-resolve the underlying phase after prep completes (online skips
+  // hold/confirmation, so prep-done → straight into the game). Classroom keeps its own
+  // onComplete → 'hold' path untouched.
+  const rerouteOnline = useCallback(async () => {
+    if (session.kind !== 'ready') return
+    try {
+      const res = await routeToPhase(session.participantId, session.gameInstanceId, 'off')
+      setPhase(res.phase)
+    } catch { /* leave the current phase in place */ }
   }, [session])
 
   // ── Render: pre-session states (no header) ────────────────────────────────
@@ -204,9 +261,35 @@ export default function Play() {
 
   // ── Render: session ready — header persists across all phases ─────────────
 
+  // Online reveal GATE: shown in front of the underlying phase until the student continues
+  // (or the group locks). This is what makes the flow "login → reveal → continue → KC → play".
+  if (revealGroupId) {
+    return (
+      <div style={{ fontFamily: typography.fontFamily }}>
+        <GameHeader studentLinks={headerLinks} />
+        <OnlineGroupReveal
+          gameInstanceId={gameInstanceId}
+          groupId={revealGroupId}
+          participantId={participantId}
+          onContinue={() => { revealDismissed.current = true; setRevealGroupId(null) }}
+        />
+      </div>
+    )
+  }
+
   return (
     <div style={{ fontFamily: typography.fontFamily }}>
       <GameHeader studentLinks={headerLinks} />
+
+      {phase.name === 'online_holding' && (
+        <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
+          <h1 style={{ marginTop: 0 }}>Not grouped yet</h1>
+          <p data-testid="crisis-online-holding" style={{ lineHeight: 1.6, color: colors.textSecondary }}>
+            Your instructor has not formed groups yet. Check back soon — this page will show your
+            group as soon as it does.
+          </p>
+        </main>
+      )}
 
       {phase.name === 'info' && (
         <InfoPage
@@ -233,7 +316,7 @@ export default function Play() {
           gameInstanceId={gameInstanceId}
           functions={functions}
           db={db}
-          onComplete={() => setPhase({ name: 'hold' })}
+          onComplete={() => { if (mode === 'off') void rerouteOnline(); else setPhase({ name: 'hold' }) }}
         />
       )}
 

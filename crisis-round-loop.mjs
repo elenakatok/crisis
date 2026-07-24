@@ -795,6 +795,112 @@ async function main() {
     check(rep.students.filter(s => s.botGroup).length === 1 && rep.students.filter(s => !s.botGroup).length === 3, '(R2) exactly one marked, three unmarked')
   }
 
+  // ══ SLICE O1 — ONLINE MODE (groupParticipantsOnline / recordLogin / getOnlineGroups) ══
+  // Classroom mode is proven untouched by every block ABOVE (they all run clock_mode default
+  // 'on' or the S3 switch). This block exercises the online path in isolation.
+  const seedOnline   = (gid, pid, name, email) => fsWrite(gid, `participants/${pid}`, {
+    participant_id: pid, game_instance_id: gid, role: 'player', is_bot: false, prep_status: 'complete', name, email,
+  })
+  const groupOnline  = (gid) => callFn('groupParticipantsOnline', asDev(gid))
+  const onlineGroups = async (gid) => (await callFn('getOnlineGroups', asDev(gid))).result
+
+  // (O1) 7 on the roster → 2 full groups + 1 short group of 1; members correct, bot-free, emails
+  banner('(O1) online pre-grouping — 7 → 3+3+1, members[] correct, bot-free, emails present')
+  {
+    const gid = 'online-7'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 7; i++) await seedOnline(gid, `o${i}`, `Student ${i}`, i === 6 ? '' : `s${i}@ex.edu`)
+
+    const g = await groupOnline(gid)
+    check(g.ok && g.result.ok, '(O1) groupParticipantsOnline ok')
+    check(g.result.groups === 3 && g.result.full_groups === 2 && g.result.short_group_size === 1, '(O1) 7 → two full groups + one short group of 1')
+
+    const og = await onlineGroups(gid)
+    const sizes = og.groups.map(x => x.size).sort((a, b) => a - b)
+    check(JSON.stringify(sizes) === JSON.stringify([1, 3, 3]), '(O1) group sizes are [1,3,3]')
+
+    const mem = og.groups.flatMap(x => x.members)
+    check(mem.length === 7, '(O1) members[] covers all 7 humans')
+    check(new Set(mem.map(m => m.participant_id)).size === 7, '(O1) no student appears in two groups')
+    check(mem.every(m => !m.participant_id.startsWith('bot_')), '(O1) members[] is bot-free')
+    check(mem.every(m => /^Student \d$/.test(m.display_name)), '(O1) members[] carry enrolled roster names')
+    check(mem.filter(m => m.email).length === 6, '(O1) six members carry emails')
+    check(mem.find(m => m.participant_id === 'o6')?.email === null, '(O1) blank roster email stored as null (name-only)')
+
+    for (const grp of og.groups) {
+      const f = await groupDoc(gid, grp.group_id)
+      check(arrVal(f.bot_participants).length === 0, `(O1) group ${grp.group_id.slice(0, 6)} written bot-free`)
+      check(f.status?.stringValue === 'matched', `(O1) group ${grp.group_id.slice(0, 6)} status 'matched'`)
+      check(f.lead_participant_id?.stringValue === arrVal(f.player_participants)[0], `(O1) group ${grp.group_id.slice(0, 6)} lead = seat 0`)
+    }
+
+    const full = og.groups.find(x => x.size === 3)
+    const leadPid = full.members[0].participant_id
+    const pf = (await fsGet(gid, `participants/${leadPid}`)).fields
+    check(pf.group_id?.stringValue === full.group_id, '(O1) participant group_id written')
+    check(pf.is_lead?.booleanValue === true, '(O1) seat-0 participant is_lead=true')
+    check(/^Student \d$/.test(pf.display_name?.stringValue ?? ''), '(O1) participant display_name set from roster name')
+
+    // recordLogin stamps last_login_at + returns the mode
+    const rl = await callFn('recordLogin', asStudent(gid, leadPid))
+    check(rl.ok && rl.result.clock_mode === 'off', '(O1) recordLogin returns clock_mode=off')
+    check((await fsGet(gid, `participants/${leadPid}`)).fields.last_login_at != null, '(O1) recordLogin stamped last_login_at')
+
+    // fillRemainderWithBots regression: still callable, no-ops (no ungrouped humans online)
+    const fr = await callFn('fillRemainderWithBots', asDev(gid))
+    check(fr.ok && fr.result.ok && fr.result.created === false, '(O1) fillRemainderWithBots no-ops on a fully-grouped online instance (unchanged, verified)')
+  }
+
+  // (O2) re-group BEFORE lock cleanly replaces; play locks; re-group AFTER lock rejected
+  banner('(O2) re-group before lock replaces; first submission locks; re-group after lock rejected')
+  {
+    const gid = 'online-lock'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 6; i++) await seedOnline(gid, `p${i}`, `Player ${i}`, `p${i}@ex.edu`)
+
+    await groupOnline(gid)
+    const before = new Set((await onlineGroups(gid)).groups.map(x => x.group_id))
+    const g2 = await groupOnline(gid)
+    check(g2.ok && g2.result.groups === 2, '(O2) re-group before lock ok')
+    const og2 = await onlineGroups(gid)
+    check(og2.groups.every(x => !before.has(x.group_id)), '(O2) re-group replaced prior groups (fresh ids)')
+    check(og2.groups.flatMap(x => x.members).length === 6, '(O2) re-group still covers all 6')
+
+    const full = og2.groups.find(x => x.size === 3)
+    const o = await openG(gid, full.group_id, 1)
+    check(o.ok && o.result.ok && o.result.clockEnabled === false, '(O2) openRound ok on online full group, clock disabled')
+    check((await groupDoc(gid, full.group_id)).seats_locked_at === undefined, '(O2) not locked before first submission')
+    const rm = await roleMapG(gid, full.group_id)
+    await bidG(gid, full.group_id, rm.seller1, 15) // first round-1 submission
+    check((await groupDoc(gid, full.group_id)).seats_locked_at != null, '(O2) seats_locked_at stamped on first submission (online)')
+
+    const g3 = await groupOnline(gid)
+    check(!g3.ok && /lock/i.test(g3.error || ''), '(O2) re-group rejected once a group has locked')
+  }
+
+  // (O3) guard: online grouping refused in classroom mode; partition sizes 1..6 correct
+  banner('(O3) clock-on guard + partition sizes (1,2,3,4,6)')
+  {
+    const cg = 'online-guard'
+    await fsWrite(cg, 'config/main', { clock_mode: 'on' })
+    for (let i = 0; i < 3; i++) await seedOnline(cg, `x${i}`, `X${i}`, `x${i}@ex.edu`)
+    const cgr = await groupOnline(cg)
+    check(!cgr.ok && /online/i.test(cgr.error || ''), '(O3) groupParticipantsOnline rejected when clock_mode=on')
+
+    const expected = { 1: [1], 2: [2], 3: [3], 4: [3, 1], 6: [3, 3] }
+    for (const n of [1, 2, 3, 4, 6]) {
+      const pg = `online-part-${n}`
+      await fsWrite(pg, 'config/main', { clock_mode: 'off' })
+      for (let i = 0; i < n; i++) await seedOnline(pg, `q${i}`, `Q${i}`, `q${i}@ex.edu`)
+      await groupOnline(pg)
+      const gg = await onlineGroups(pg)
+      const sz = gg.groups.map(x => x.size).sort((a, b) => b - a)
+      check(JSON.stringify(sz) === JSON.stringify(expected[n]), `(O3) partition n=${n} → sizes [${expected[n].join(',')}]`)
+      const pids = gg.groups.flatMap(x => x.members.map(m => m.participant_id))
+      check(pids.length === n && new Set(pids).size === n, `(O3) partition n=${n} → all ${n} placed exactly once`)
+    }
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))
