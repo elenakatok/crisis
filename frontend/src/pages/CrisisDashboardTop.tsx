@@ -209,16 +209,24 @@ function StripActions({
     return <span data-testid={`crisis-strip-locked-${g.groupNumber}`} style={{ fontSize: typography.sizeXs, color: colors.textMuted }} title="This group has started — seats are locked.">🔒 locked</span>
   }
 
+  // The move control is ALWAYS visible on an unlocked group that has members — NOT gated on a
+  // free seat existing elsewhere (the original bug: with all-full groups no destination existed,
+  // so every line rendered an empty span). When no other group has a free seat the destination
+  // dropdown says so; it becomes usable the moment a seat opens. Fill shows only when this group
+  // actually has empty seats.
+  const hasMembers = live.members.length > 0
+  const noDest = otherDests.length === 0
+
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm, flexWrap: 'wrap' }}>
-      {live.members.length > 0 && otherDests.length > 0 && (
+    <span data-testid={`crisis-strip-actions-${g.groupNumber}`} style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm, flexWrap: 'wrap' }}>
+      {hasMembers && (
         <>
           <select data-testid={`crisis-strip-move-member-${g.groupNumber}`} value={member} disabled={busy} onChange={e => setMember(e.target.value)} style={{ fontSize: typography.sizeXs }}>
-            <option value="">Move…</option>
+            <option value="">Move member…</option>
             {live.members.map(m => <option key={m.participant_id} value={m.participant_id}>{m.display_name}</option>)}
           </select>
-          <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doMove(d) }} style={{ fontSize: typography.sizeXs }}>
-            <option value="">to group…</option>
+          <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member || noDest} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doMove(d) }} style={{ fontSize: typography.sizeXs }}>
+            <option value="">{noDest ? 'to group… (none has a free seat)' : 'to group…'}</option>
             {otherDests.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
           </select>
         </>
@@ -227,6 +235,9 @@ function StripActions({
         <button data-testid={`crisis-strip-fill-${g.groupNumber}`} onClick={doFill} disabled={busy} style={{ fontSize: typography.sizeXs }}>
           Fill {emptySeats} seat{emptySeats === 1 ? '' : 's'} with bots
         </button>
+      )}
+      {!hasMembers && emptySeats === 0 && (
+        <span style={{ fontSize: typography.sizeXs, color: colors.textMuted }}>full</span>
       )}
     </span>
   )

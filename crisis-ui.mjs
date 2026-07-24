@@ -550,6 +550,14 @@ async function main() {
     await dOff.waitForSelector('[data-testid="crisis-summary-row-1"]', { timeout: 12000 }).catch(() => {})
     check(await testidPresent(dOff, 'crisis-summary-row-1'), '(11b) grouping via the single control fills the group strip')
 
+    // PRODUCTION-SHAPED all-full case (the reported bug): a single FULL group — no other group
+    // has a free seat — must STILL show a VISIBLE move control on its line, in a real viewport.
+    await dOff.waitForSelector('[data-testid="crisis-strip-move-member-1"]', { timeout: 8000 }).catch(() => {})
+    check(await dOff.locator('[data-testid="crisis-strip-actions-1"]').isVisible(), '(11b) all-full group line has a VISIBLE actions area (production bug: was empty)')
+    check(await dOff.locator('[data-testid="crisis-strip-move-member-1"]').isVisible(), '(11b) all-full group shows a VISIBLE move-member control (no free seat anywhere)')
+    const memberBox = await dOff.locator('[data-testid="crisis-strip-move-member-1"]').boundingBox()
+    check(!!memberBox && memberBox.width > 0 && memberBox.height > 0, '(11b) move control has real on-screen size (not zero-size/hidden)')
+
     // (11c) LIVE re-group without reload + strip actions (move, fill)
     await fsWrite(og, 'participants/w3', { participant_id: 'w3', game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: 'Wanda 3', email: 'w3@ex.edu' })
     await dOff.click('[data-testid="crisis-match-control"]') // now labeled "Re-group participants"
