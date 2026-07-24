@@ -1357,6 +1357,129 @@ async function main() {
     check(rep.students.length === 13, '(O15) 13 human student rows (bots excluded)')
   }
 
+  // (O16) O2.5C — the wrapper-vs-core guard bug must be impossible to reintroduce: topUp + every
+  // moveSeat path must work in CLASSROOM mode against a classroom-formed group (no "online-mode" error).
+  banner('(O16) O2.5C — no wrapper mode guard: topUp + moveSeat (all paths) in classroom')
+  {
+    const gid = 'o25-guard'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' }) // CLASSROOM
+    await seedG(gid, 'g1', ['a0', 'a1', 'a2'])
+    await seedG(gid, 'g2', ['b0', 'b1', 'b2'])
+    const un = await moveSeatFn(gid, 'a0', '') // ungroup
+    check(un.ok, '(O16) moveSeat UNGROUP works in classroom (no mode guard)')
+    const tf = await topUpFn(gid, 'g1') // THE Elena bug: must not error "Bot top-up is an online-mode action"
+    check(tf.ok && tf.result.added === 1, '(O16) topUpGroupWithBots WORKS in classroom (Elena stale-deploy bug fixed in source)')
+    check(!/online|mode/i.test(tf.error || ''), '(O16) topUp returns NO "online-mode action" error')
+    const nw = await moveSeatFn(gid, 'a0', 'new') // create-new-group (No Group student)
+    check(nw.ok && nw.result.created, '(O16) moveSeat NEW-GROUP works in classroom (no mode guard)')
+    const mv = await moveSeatFn(gid, 'b0', nw.result.new_group) // move (has source)
+    check(mv.ok && mv.result.moved, '(O16) moveSeat MOVE works in classroom (no mode guard)')
+    await moveSeatFn(gid, 'b1', '') // ungroup b1 → No Group
+    const place = await moveSeatFn(gid, 'b1', nw.result.new_group) // no-source place-in
+    check(place.ok && place.result.moved, '(O16) moveSeat NO-SOURCE PLACE-IN works in classroom (no mode guard)')
+  }
+
+  // (O17) O2.5B — a human replaces a bot: moving into a FULL group whose only opening is a bot seat
+  // EVICTS one bot. Tested for BOTH bot kinds (classroom matchWithBots + online topUp) — cleanup is
+  // identical (both are makeBotSeat docs in bot_participants; no round data on an unlocked group).
+  banner('(O17) O2.5B — human replaces bot (evict), classroom + online bot kinds')
+  const findBotGroup = async (gid, groupIds) => {
+    let botG = null, humanG = null
+    for (const id of groupIds) { const gd = await groupDoc(gid, id); if (arrVal(gd.bot_participants).length > 0) botG = id; else humanG = id }
+    return { botG, humanG }
+  }
+  {
+    // CLASSROOM bot kind
+    const gid = 'o25-evict-classroom'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' })
+    await seedRoster(gid, ['c0', 'c1', 'c2', 'c3']) // 4 humans → triggerMatching = 1 full-human + 1 bot-filled
+    await callFn('triggerMatching', asDev(gid))
+    const groupIds = (await rosterOf(gid)).result.groups.map(g => g.group_id)
+    const { botG, humanG } = await findBotGroup(gid, groupIds)
+    check(!!botG && !!humanG, '(O17) classroom: triggerMatching produced a bot-filled group + a full-human group')
+    const mover = arrVal((await groupDoc(gid, humanG)).player_participants)[0]
+    const botsBefore = arrVal((await groupDoc(gid, botG)).bot_participants)
+    const mv = await moveSeatFn(gid, mover, botG)
+    check(mv.ok && mv.result.moved && !!mv.result.evicted_bot, '(O17) classroom: moving a human into a full bot group EVICTS a bot')
+    const evicted = mv.result.evicted_bot
+    const gd = await groupDoc(gid, botG)
+    check(arrVal(gd.bot_participants).length === botsBefore.length - 1, '(O17) classroom: bot removed from bot_participants')
+    check(!arrVal(gd.player_participants).includes(evicted) && arrVal(gd.player_participants).includes(mover), '(O17) classroom: bot left the seat, human took it')
+    check(Number(gd.bot_count?.integerValue) === botsBefore.length - 1, '(O17) classroom: bot_count decremented')
+    check(gd.bot_types?.mapValue?.fields?.[evicted] === undefined, '(O17) classroom: evicted bot removed from bot_types')
+    check(!(await fsGet(gid, `participants/${evicted}`))?.fields, '(O17) classroom: evicted bot participant doc deleted')
+    check(!(await fsGet(gid, `crisis_round/${botG}`))?.fields, '(O17) classroom: no round data existed (unlocked group)')
+    check((await fsGet(gid, `participants/${mover}`)).fields.role?.stringValue === 'player', '(O17) classroom: the human is role=player')
+    // a bot NEVER evicts a human: a FULL all-human group rejects a move-in (no bot seat to take).
+    await seedG(gid, 'allhuman', ['w0', 'w1', 'w2'])
+    const rej = await moveSeatFn(gid, 'c3', 'allhuman')
+    check(!rej.ok && /full/i.test(rej.error || ''), '(O17) classroom: a full ALL-HUMAN group rejects a move-in (bots never evict humans)')
+  }
+  {
+    // ONLINE bot kind
+    const gid = 'o25-evict-online'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) await seedOnline(gid, `e${i}`, `E ${i}`, `e${i}@ex.edu`)
+    await groupOnline(gid)
+    const ogs = (await onlineGroups(gid)).groups
+    const shortG = ogs.find(g => g.size === 1), fullG = ogs.find(g => g.size === 3)
+    await topUpFn(gid, shortG.group_id) // online bot kind: 1 human + 2 bots
+    const botsBefore = arrVal((await groupDoc(gid, shortG.group_id)).bot_participants)
+    const mover = fullG.members[0].participant_id
+    const mv = await moveSeatFn(gid, mover, shortG.group_id)
+    check(mv.ok && mv.result.moved && !!mv.result.evicted_bot, '(O17) online: moving a human into a full bot group EVICTS a bot')
+    const gd = await groupDoc(gid, shortG.group_id)
+    check(arrVal(gd.bot_participants).length === botsBefore.length - 1, '(O17) online: bot removed from bot_participants')
+    check(membersRaw(gd).some(m => m.pid === mover), '(O17) online: mover added to members[] (online group maintained)')
+    check(!(await fsGet(gid, `participants/${mv.result.evicted_bot}`))?.fields, '(O17) online: evicted bot participant doc deleted')
+    check(membersRaw(gd).length === 2 && arrVal(gd.player_participants).length === 3, '(O17) online: group now 2 humans + 1 bot (still full, one bot remains)')
+  }
+
+  // (O18) O2.5D — startAllGroups: opens full not-started groups, skips short + running, idempotent
+  // + re-pressable (latecomer), classroom-guarded.
+  banner('(O18) O2.5D — startAllGroups (Start class)')
+  {
+    const gid = 'o25-start'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' })
+    await seedG(gid, 'sg1', ['e0', 'e1', 'e2'])
+    await seedG(gid, 'sg2', ['f0', 'f1', 'f2'])
+    await seedG(gid, 'sg3', ['h0', 'h1', 'h2'])
+    await moveSeatFn(gid, 'h0', '') // sg3 → 2 (short)
+    const r1 = await callFn('startAllGroups', { _dev: { game_instance_id: gid, seed: 1 } })
+    check(r1.ok && r1.result.started === 2 && r1.result.skipped_short === 1, '(O18) 2 full groups started, 1 short skipped')
+    check(r1.result.groups.some(g => g.result === 'skipped_short'), '(O18) the short group is reported skipped_short')
+    check((await iviewG(gid, 'sg1')).result.status === 'in_progress', '(O18) sg1 is now running')
+    const r2 = await callFn('startAllGroups', { _dev: { game_instance_id: gid, seed: 1 } })
+    check(r2.result.started === 0 && r2.result.already_running === 2 && r2.result.skipped_short === 1, '(O18) re-press idempotent: 0 started, 2 already_running, 1 short')
+    await topUpFn(gid, 'sg3') // fill the short group → full
+    const r3 = await callFn('startAllGroups', { _dev: { game_instance_id: gid, seed: 1 } })
+    check(r3.result.started === 1 && r3.result.already_running === 2, '(O18) after bot-fill, re-press starts ONLY the newly-ready group (running untouched)')
+    const ogid = 'o25-start-online'
+    await fsWrite(ogid, 'config/main', { clock_mode: 'off' })
+    const rOnline = await callFn('startAllGroups', { _dev: { game_instance_id: ogid } })
+    check(!rOnline.ok && /classroom/i.test(rOnline.error || ''), '(O18) startAllGroups rejects in online mode (classroom action)')
+  }
+
+  // (O19) O2.5E(a) — a classroom latecomer replaces an auto-filled bot in a not-started group and
+  // becomes a fully normal member (role=player, plays when the group starts).
+  banner('(O19) O2.5E(a) — latecomer replaces a bot')
+  {
+    const gid = 'o25-late-a'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' })
+    await seedRoster(gid, ['m0', 'm1', 'm2', 'm3'])
+    await callFn('triggerMatching', asDev(gid))
+    const groupIds = (await rosterOf(gid)).result.groups.map(g => g.group_id)
+    const { botG } = await findBotGroup(gid, groupIds)
+    // latecomer syncs: role-less, no group (what makeSyncRoster creates before first login)
+    await fsWrite(gid, 'participants/late', { participant_id: 'late', game_instance_id: gid, name: 'Late Larry', email: 'late@ex.edu' })
+    const mv = await moveSeatFn(gid, 'late', botG)
+    check(mv.ok && mv.result.moved && !!mv.result.evicted_bot, '(O19) latecomer placed into a bot group evicts a bot')
+    const lateDoc = await fsGet(gid, 'participants/late')
+    check(lateDoc.fields.role?.stringValue === 'player' && lateDoc.fields.group_id?.stringValue === botG, '(O19) latecomer becomes role=player in the group (fully normal member)')
+    const o = await openG(gid, botG, 1)
+    check(o.ok && o.result.ok, '(O19) the group with the ex-latecomer starts and plays')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

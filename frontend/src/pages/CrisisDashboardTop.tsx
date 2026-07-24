@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { collection, onSnapshot, type Timestamp } from 'firebase/firestore'
 import { colors, typography, spacing } from '@mygames/game-ui'
 import { auth, db } from '../firebase'
-import { getCrisisDashboard, setClockMode, moveSeat, topUpGroupWithBots, type DashboardGroup } from '../api'
+import { getCrisisDashboard, setClockMode, moveSeat, topUpGroupWithBots, startAllGroups, type DashboardGroup, type StartGroupResult } from '../api'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CrisisDashboardTop (Slice O2.1) — THE control-room top area, portaled to the top of the
@@ -103,11 +103,19 @@ export default function CrisisDashboardTop() {
 
   const anyStarted = useMemo(() => groups.some(g => g.status !== 'not_started'), [groups])
   const numberById = useMemo(() => new Map(groups.map(g => [g.groupId, g.groupNumber])), [groups])
-  // Destinations for a move: groups with a free seat and not locked (by group_id).
+  // Destinations for a move (by group_id), unlocked only. A group with a free human seat is a
+  // normal move; a FULL group that still has a bot seat is a §O2.5B "replaces a bot" destination
+  // (the move evicts one bot). A full all-human group is not a destination.
   const destinations = useMemo(
-    () => Object.values(live).filter(g => g.player_participants.length < 3 && g.seats_locked_at == null)
-      .map(g => ({ id: g.id, n: numberById.get(g.id) ?? null })),
+    () => Object.values(live)
+      .filter(g => g.seats_locked_at == null && (g.player_participants.length < 3 || g.bot_participants.length > 0))
+      .map(g => ({ id: g.id, n: numberById.get(g.id) ?? null, replacesBot: g.player_participants.length >= 3 })),
     [live, numberById],
+  )
+  // §O2.5D — groups ready for "Start class" = not-started AND full (3 seats, humans+bots).
+  const readyCount = useMemo(
+    () => groups.filter(g => g.status === 'not_started' && (live[g.groupId]?.player_participants.length ?? 0) === 3).length,
+    [groups, live],
   )
 
   const chooseMode = async (m: 'on' | 'off') => {
@@ -152,9 +160,13 @@ export default function CrisisDashboardTop() {
 
       {/* ── 2. GROUP STRIP (the single group area) ──────────────────────────────── */}
       <div data-testid="crisis-live-summary" style={{ margin: '0 0 1.5rem', padding: '0.75rem 1rem', border: `1px solid ${colors.borderMid}`, borderRadius: 8, background: colors.surfaceSubtle }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: spacing.gapSm }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: spacing.gapMd, marginBottom: spacing.gapSm, flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 700, fontSize: '1.05rem' }}>Groups</span>
-          <a data-testid="crisis-live-nav" href={`/live${window.location.search}`} style={{ color: '#D38626', fontWeight: 700, fontSize: typography.sizeSm, textDecoration: 'none' }}>Live view →</a>
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.gapMd }}>
+            {/* §O2.5D — the ONE "Start class" control (classroom only; online groups auto-start). */}
+            {!online && groups.length > 0 && <StartClass readyCount={readyCount} />}
+            <a data-testid="crisis-live-nav" href={`/live${window.location.search}`} style={{ color: '#D38626', fontWeight: 700, fontSize: typography.sizeSm, textDecoration: 'none' }}>Live view →</a>
+          </div>
         </div>
 
         {groups.length === 0 ? (
@@ -169,6 +181,9 @@ export default function CrisisDashboardTop() {
                 <span style={{ fontSize: typography.sizeSm, color: g.status === 'in_progress' ? colors.successText : colors.textSecondary }}>
                   {g.status === 'in_progress' && '● '}{statusLine(g)}
                 </span>
+                {/* §O2.5A — the full seat picture: bot seats visibly counted so a full-with-bots
+                    group ("3/3 · 1 bot") never looks like a short group. */}
+                <SeatPicture live={live[g.groupId]} groupNumber={g.groupNumber} />
                 {/* §O3: a student "can't reach my group" flag — ⚑ with who/when. Goes STALE
                     automatically once the group locks (started playing = resolved), so a stale
                     flag never renders. */}
@@ -209,6 +224,55 @@ export default function CrisisDashboardTop() {
   )
 }
 
+// §O2.5A — glanceable seat picture. filled/3 with the bot count called out, so a full group that
+// is only full BECAUSE of bots is never mistaken for a group that still needs students. Both modes.
+function SeatPicture({ live, groupNumber }: { live?: LiveGroup; groupNumber: number | null }) {
+  if (!live) return null
+  const filled = live.player_participants.length
+  const bots = live.bot_participants.length
+  return (
+    <span data-testid={`crisis-seats-${groupNumber}`} data-bots={bots} style={{ fontSize: typography.sizeXs, color: bots > 0 ? '#b45309' : colors.textMuted, fontVariantNumeric: 'tabular-nums' }}>
+      {filled}/3{bots > 0 ? ` · ${bots} bot${bots === 1 ? '' : 's'}` : ''}
+    </span>
+  )
+}
+
+// §O2.5D — the single "Start class" control (classroom). Opens round 1 for every ready (full, not-
+// started) group in one press; idempotent + re-pressable (later press starts groups that became
+// ready, e.g. after a latecomer + bot-fill). Confirms, then shows an inline result summary.
+function StartClass({ readyCount }: { readyCount: number }) {
+  const [busy, setBusy] = useState(false)
+  const [summary, setSummary] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const go = async () => {
+    if (readyCount === 0 || busy) return
+    if (!window.confirm(`Start the game for all ${readyCount} ready group${readyCount === 1 ? '' : 's'}?`)) return
+    setBusy(true); setErr(null)
+    try {
+      const r = await startAllGroups()
+      const shorts = r.groups.filter((x: StartGroupResult) => x.result === 'skipped_short')
+      const shortNote = shorts.length ? ` — ${shorts.map((x: StartGroupResult) => `Group ${x.groupNumber} has an empty seat`).join('; ')}` : ''
+      setSummary(`${r.started} started${r.skipped_short ? ` · ${r.skipped_short} skipped${shortNote}` : ''}${r.already_running ? ` · ${r.already_running} already running` : ''}`)
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not start the class.') }
+    setBusy(false)
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm }}>
+      <button
+        data-testid="crisis-start-class"
+        onClick={go}
+        disabled={busy || readyCount === 0}
+        title={readyCount === 0 ? 'No full groups are ready to start.' : `Start ${readyCount} ready group${readyCount === 1 ? '' : 's'}.`}
+        style={{ padding: '0.35rem 0.8rem', fontWeight: 700, cursor: busy || readyCount === 0 ? 'not-allowed' : 'pointer', borderRadius: 4, border: `1px solid ${colors.borderMid}`, background: readyCount === 0 ? colors.white : '#15803d', color: readyCount === 0 ? colors.textMuted : colors.white, opacity: readyCount === 0 ? 0.6 : 1 }}
+      >
+        {busy ? 'Starting…' : 'Start class'}
+      </button>
+      {summary && <span data-testid="crisis-start-class-summary" style={{ fontSize: typography.sizeXs, color: colors.textSecondary }}>{summary}</span>}
+      {err && <span data-testid="crisis-start-class-error" role="alert" style={{ fontSize: typography.sizeXs, color: '#b91c1c' }}>{err}</span>}
+    </span>
+  )
+}
+
 // §O3 flag indicator on a group's strip line. Renders ONLY when the group carries a live (non-
 // stale) flag: a flag present AND the group not yet locked. Once seats lock (first submission),
 // the flag is resolved and the badge disappears — no instructor "clear" action, the lock clears it.
@@ -234,13 +298,14 @@ function NoGroupMember({
   p, destinations, onPlace,
 }: {
   p: { participant_id: string; name: string }
-  destinations: { id: string; n: number | null }[]
+  destinations: { id: string; n: number | null; replacesBot: boolean }[]
   onPlace: (dest: string) => void
 }) {
   const [busy, setBusy] = useState(false)
   const doDest = async (dest: string) => {
     if (!dest) return
     if (dest === '__new__') { if (!window.confirm(`Create a new group with ${p.name}?`)) return; setBusy(true); await onPlace('new'); setBusy(false); return }
+    // A "(replaces a bot)" destination evicts a bot implicitly — NO confirm (Elena approved §O2.5B).
     setBusy(true); await onPlace(dest); setBusy(false)
   }
   return (
@@ -248,7 +313,7 @@ function NoGroupMember({
       <span style={{ color: colors.textStrong }}>{p.name}</span>
       <select data-testid={`crisis-nogroup-move-${p.participant_id}`} value="" disabled={busy} onChange={e => { const v = e.target.value; e.currentTarget.value = ''; void doDest(v) }} style={{ fontSize: typography.sizeXs }}>
         <option value="" disabled>place in…</option>
-        {destinations.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
+        {destinations.map(d => <option key={d.id} value={d.id}>Group {d.n}{d.replacesBot ? ' (replaces a bot)' : ''}</option>)}
         <option value="__new__">→ New group</option>
       </select>
     </span>
@@ -264,7 +329,7 @@ function StripActions({
   g: DashboardGroup
   live?: LiveGroup
   names: Record<string, string>
-  destinations: { id: string; n: number | null }[]
+  destinations: { id: string; n: number | null; replacesBot: boolean }[]
   onMove: (pid: string, dest: string) => void
   onFill: () => void
 }) {
@@ -320,7 +385,7 @@ function StripActions({
               when no group has a free seat (the full-class case). */}
           <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doDest(d) }} style={{ fontSize: typography.sizeXs }}>
             <option value="" disabled>move to…</option>
-            {otherDests.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
+            {otherDests.map(d => <option key={d.id} value={d.id}>Group {d.n}{d.replacesBot ? ' (replaces a bot)' : ''}</option>)}
             <option data-testid={`crisis-strip-new-${g.groupNumber}`} value="__new__">→ New group</option>
             <option data-testid={`crisis-strip-remove-${g.groupNumber}`} value="__remove__">— Remove from group</option>
           </select>

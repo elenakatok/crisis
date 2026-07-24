@@ -195,6 +195,48 @@ export const openRound = onCall(CORS, async (request) => {
   return openRoundCore(iid, groupId, { nowMs: nowMs(data), seed: typeof devSeed === 'number' ? devSeed as number : undefined })
 })
 
+// ── startAllGroups (instructor, §O2.5D): the ONE "Start class" control. Opens round 1 for every
+// not-started FULL group (humans + bots) via openRoundCore — no new open logic. Skips short groups
+// (a seat still empty) and running groups. Idempotent + RE-PRESSABLE: a later press starts groups
+// that became ready since (the latecomer case), leaving running groups untouched. CLASSROOM ONLY —
+// online groups auto-start when everyone arrives (maybeAutoOpen). Returns per-group results.
+export const startAllGroups = onCall(CORS, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const iid = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
+  const instanceRef = admin.firestore().collection('game_instances').doc(iid)
+
+  const [groupsSnap, roundsSnap, configSnap] = await Promise.all([
+    instanceRef.collection('groups').get(),
+    instanceRef.collection('crisis_round').get(),
+    instanceRef.collection('config').doc('main').get(),
+  ])
+  if ((configSnap.data()?.['clock_mode'] ?? 'on') === 'off') {
+    throw new HttpsError('failed-precondition', '“Start class” is a classroom action. Online groups start automatically when everyone arrives.')
+  }
+
+  const running = new Set(roundsSnap.docs.map((d) => d.id)) // a crisis_round doc ⇒ already started
+  const sortedIds = groupsSnap.docs.map((d) => d.id).sort((a, b) => a.localeCompare(b))
+  const numberById = new Map(sortedIds.map((id, i) => [id, i + 1]))
+  const dataById = new Map(groupsSnap.docs.map((d) => [d.id, d.data() as Record<string, unknown>]))
+  const devSeed = isEmu() ? (data['_dev'] as Record<string, unknown> | undefined)?.['seed'] : undefined
+  const now = nowMs(data)
+
+  const results: { groupId: string; groupNumber: number; result: 'started' | 'skipped_short' | 'already_running'; size?: number }[] = []
+  let started = 0, skippedShort = 0, alreadyRunning = 0
+  for (const gid of sortedIds) {
+    const gn = numberById.get(gid) ?? 0
+    if (running.has(gid)) { results.push({ groupId: gid, groupNumber: gn, result: 'already_running' }); alreadyRunning++; continue }
+    const players = (dataById.get(gid)?.['player_participants'] as string[] | undefined) ?? []
+    if (players.length !== 3) { results.push({ groupId: gid, groupNumber: gn, result: 'skipped_short', size: players.length }); skippedShort++; continue }
+    // Full + not started → open round 1. idempotent:true is belt-and-suspenders against a group that
+    // started between our read and this write (never resets a progressed group).
+    await openRoundCore(iid, gid, { nowMs: now, seed: typeof devSeed === 'number' ? (devSeed as number) : undefined, idempotent: true })
+    results.push({ groupId: gid, groupNumber: gn, result: 'started' }); started++
+  }
+
+  return { ok: true as const, started, skipped_short: skippedShort, already_running: alreadyRunning, groups: results }
+})
+
 // ── maybeAutoOpen: ONLINE round-1 auto-start (§O2). When a group member reaches the game
 // screen (getRoundView), record their arrival; once every HUMAN seat has arrived (bot seats
 // count as present), open round 1 — no instructor click. Classroom is untouched (manual Start

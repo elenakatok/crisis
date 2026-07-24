@@ -391,7 +391,17 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
     const target = targetSnap.data() as Record<string, unknown>
     if (target['seats_locked_at'] != null) throw new HttpsError('failed-precondition', 'The destination group has already started playing (seats are locked).')
     const targetPlayers = (target['player_participants'] as string[] | undefined) ?? []
-    if (targetPlayers.length >= GROUP_SIZE) throw new HttpsError('failed-precondition', 'The destination group is already full (3 seats).')
+    const targetBotsArr = (target['bot_participants'] as string[] | undefined) ?? []
+    // §O2.5B — HUMAN REPLACES BOT: a full group may still take a human if one of its seats is a
+    // bot. Moving a human in EVICTS one bot (the last-added). Never evict a human; a full all-human
+    // group is genuinely full. Both bot kinds (classroom matchWithBots + online topUp) are makeBotSeat
+    // docs in bot_participants — cleanup is identical (arrays + doc delete; no round data on an
+    // unlocked group). Unlocked-only, as ever (the lock guard above).
+    let evictedBot: string | null = null
+    if (targetPlayers.length >= GROUP_SIZE) {
+      evictedBot = targetBotsArr[targetBotsArr.length - 1] ?? null
+      if (!evictedBot) throw new HttpsError('failed-precondition', 'The destination group is already full (3 human seats).')
+    }
 
     const sourceRef = sourceGroupId ? instanceRef.collection('groups').doc(sourceGroupId) : null
     let source: Record<string, unknown> | null = null
@@ -404,9 +414,11 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
       newSource = ((source['player_participants'] as string[] | undefined) ?? []).filter((x) => x !== participantId)
     }
 
-    const newTarget = [...targetPlayers, participantId]
+    // Evicted bot (if any) leaves BOTH the seat list and the bot arrays; the human takes the seat.
+    const targetPlayersAfterEvict = evictedBot ? targetPlayers.filter((x) => x !== evictedBot) : targetPlayers
+    const newTarget = [...targetPlayersAfterEvict, participantId]
     const sourceBots = new Set((source?.['bot_participants'] as string[] | undefined) ?? [])
-    const targetBots = new Set((target['bot_participants'] as string[] | undefined) ?? [])
+    const targetBots = new Set(targetBotsArr.filter((x) => x !== evictedBot))
 
     // Read every human doc in both final groups for members[]/member_logins/lead rebuild.
     const humanPids = [...newSource.filter((x) => !sourceBots.has(x)), ...newTarget.filter((x) => !targetBots.has(x))]
@@ -422,14 +434,23 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
       tx.update(sourceRef, src.fields)
       for (const pid of newSource) if (!sourceBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
     }
-    tx.update(targetRef, tgt.fields)
+    const targetUpdate: Record<string, unknown> = { ...tgt.fields }
+    if (evictedBot) {
+      const botTypes = { ...((target['bot_types'] as Record<string, unknown> | undefined) ?? {}) }
+      delete botTypes[evictedBot]
+      targetUpdate['bot_participants'] = [...targetBots]
+      targetUpdate['bot_count'] = targetBots.size
+      targetUpdate['bot_types'] = botTypes
+    }
+    tx.update(targetRef, targetUpdate)
+    if (evictedBot) tx.delete(instanceRef.collection('participants').doc(evictedBot)) // the bot seat owns only its doc (unlocked → no round data)
 
     // The moved/placed participant → target group. role:'player' covers a late/role-less No Group
     // student (idempotent for an already-roled student).
     tx.update(pRef, { group_id: targetGroupId, is_lead: participantId === tgt.lead, role: 'player' })
     for (const pid of newTarget) if (!targetBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === tgt.lead })
 
-    return { ok: true as const, moved: true, source_group: sourceGroupId ?? null, target_group: targetGroupId }
+    return { ok: true as const, moved: true, source_group: sourceGroupId ?? null, target_group: targetGroupId, evicted_bot: evictedBot }
   })
 }
 

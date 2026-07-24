@@ -69,6 +69,7 @@ export { scoreAndRecord } from './scoreAndRecord'
 // pure Slice-1 machine). The SAME callable names the Slice-3 student UI will invoke.
 export {
   openRound,
+  startAllGroups,
   submitBid,
   submitAllocation,
   submitFix,

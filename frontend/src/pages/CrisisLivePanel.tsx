@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { colors, typography, spacing } from '@mygames/game-ui'
-import { getCrisisDashboard, openRound, type DashboardGroup } from '../api'
+import { getCrisisDashboard, type DashboardGroup } from '../api'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CrisisLivePanel — the §4A instructor WINDOW (Slice 4). Read-only: it SHOWS which
 // round each group is on, the current stage, and WHICH SEAT the stage is waiting on
 // ("who is holding it up") — plus timeout counts (§3.3) and whether a crisis occurred.
 //
-// NOT a control. The ONLY buttons are the instructor's endorsed LAUNCHER action
-// ("Start game" = openRound) — no extend-timer, no attention checks, no liveness (all
-// rejected by the spec). Bots are already filtered out server-side (§5.3). Renders
-// sensibly whether the clock is ON (countdown) or OFF (no clock UI at all, §3.1).
+// NOT a control (§O2.5D). The per-group "Start game" buttons are GONE — starting is one
+// "Start class" button on the dashboard (classroom) or automatic on arrival (online). /live is
+// display-only: a ready group reads "ready — start from the dashboard". No extend-timer, no
+// attention checks, no liveness (all rejected by the spec). Bots are filtered out server-side
+// (§5.3). Renders sensibly whether the clock is ON (countdown) or OFF (no clock UI at all, §3.1).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const STAGE_LABEL: Record<string, string> = { bidding: 'Bidding', allocation: 'Allocation', fixing: 'Fix decision' }
@@ -31,7 +32,6 @@ function Countdown({ deadlineMs }: { deadlineMs: number | null }) {
 export default function CrisisLivePanel() {
   const [groups, setGroups] = useState<DashboardGroup[] | null>(null)
   const [online, setOnline] = useState(false)
-  const [starting, setStarting] = useState<string | null>(null)
   const cancelled = useRef(false)
 
   const poll = async () => {
@@ -47,12 +47,6 @@ export default function CrisisLivePanel() {
     return () => { cancelled.current = true; clearInterval(id) }
   }, [])
 
-  const start = async (groupId: string) => {
-    setStarting(groupId)
-    try { await openRound(groupId); await poll() } catch { /* surfaced on next poll */ }
-    setStarting(null)
-  }
-
   if (groups === null) return <section style={{ margin: `${spacing.gapMd} 0`, fontFamily: typography.fontFamily, color: colors.textSecondary }}>Loading live view…</section>
   if (groups.length === 0) return null
 
@@ -67,14 +61,13 @@ export default function CrisisLivePanel() {
             {g.status === 'not_started' && (
               <div>
                 <div style={label}>Not started</div>
-                {/* Online (clock OFF): round 1 auto-opens when all seats have arrived — no
-                    Start game button. Classroom keeps the manual launcher action. */}
-                {g.startable && !online && (
-                  <button data-testid={`dash-start-${g.groupNumber}`} style={{ marginTop: spacing.gapSm }} disabled={starting === g.groupId} onClick={() => start(g.groupId)}>
-                    {starting === g.groupId ? 'Starting…' : 'Start game'}
-                  </button>
+                {/* §O2.5D — display-only. A ready (full) group starts from the dashboard (classroom)
+                    or automatically on arrival (online); no per-group Start button here. */}
+                {g.startable && (
+                  online
+                    ? <div style={{ ...label, marginTop: spacing.gapSm }}>Starts automatically when everyone arrives.</div>
+                    : <div data-testid={`dash-ready-${g.groupNumber}`} style={{ marginTop: spacing.gapSm, color: colors.successText, fontSize: '0.8rem' }}>Ready — start from the dashboard.</div>
                 )}
-                {g.startable && online && <div style={{ ...label, marginTop: spacing.gapSm }}>Starts automatically when everyone arrives.</div>}
               </div>
             )}
 

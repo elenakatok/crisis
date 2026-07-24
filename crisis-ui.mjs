@@ -355,6 +355,17 @@ async function main() {
     check(await testidPresent(live, 'crisis-mode-readout'), '(8) /live shows the session mode READ-ONLY')
     check(!(await testidPresent(live, 'crisis-clock-switch')) && !(await testidPresent(live, 'clock-off')), '(8) /live no longer has the mode toggle (moved to dashboard)')
     await live.close()
+
+    // §O2.5D — /live is display-only: a NOT-STARTED full group shows "ready — start from the
+    // dashboard" and has NO per-group Start button (starting moved to the dashboard's "Start class").
+    const gid2 = 'ui-live-ready'; await seedGroup(gid2) // matched, NOT opened
+    const live2 = await ctx.newPage()
+    await live2.goto(`${FE}/live?_dev_game_instance_id=${gid2}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await live2.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2000)
+    check(!(await testidPresent(live2, 'dash-start-1')), '(8) /live has NO per-group Start button (removed §O2.5D)')
+    check(await testidPresent(live2, 'dash-ready-1'), '(8) /live shows a ready group as "ready — start from the dashboard"')
+    await live2.close()
   }
 
   // (9) reports page: three reports, group selector, allocations chart (recharts), SAA-uniform
@@ -932,6 +943,122 @@ async function main() {
     const firstAfter = await rp.locator('[data-testid^="status-row-"]').first().getAttribute('data-testid')
     check(firstBefore !== firstAfter || true, '(16d) the status table is sortable (header click reorders)')
     await rp.close()
+  }
+
+  // (17) O2.5 A/B/C/D on a classroom dashboard: bot seats visible, "(replaces a bot)" destinations,
+  // fill-with-bots visible on a fresh new-group, and the single "Start class" control.
+  banner('(17) O2.5 — bot visibility + replaces-a-bot label + fill-on-new-group + Start class')
+  {
+    const seedRoster = (g, pids) => fetch(`${FUNCTIONS}/seedRosterForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: g, participant_ids: pids }) })
+    const gid = 'ui-o25-class'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' })
+    await seedRoster(gid, ['a', 'b', 'c', 'd']) // 4 humans → triggerMatching = 1 full-human + 1 bot-filled (1 human + 2 bots)
+    await callFn('triggerMatching', { _dev: { game_instance_id: gid } })
+    const dash = await ctx.newPage()
+    dash.on('dialog', d => d.accept())
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="crisis-summary-row-1"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2800)
+
+    // (17a) Part A — a bot-filled group shows the bot count; full-with-bots is NOT shown as short.
+    const seatTexts = await dash.locator('[data-testid^="crisis-seats-"]').allTextContents()
+    check(seatTexts.some(t => /3\/3 · \d bot/.test(t)), `(17a) a bot-filled group shows "3/3 · N bot" [${seatTexts.join(' | ')}]`)
+    check(await dash.locator('[data-testid^="crisis-strip-fill-"]').count() === 0, '(17a) no fill button on any group — both are full (a full-with-bots group never looks short)')
+
+    // (17b) Part B — a full-with-bots group is offered as a "(replaces a bot)" destination.
+    let sawReplacesBot = false
+    for (const n of [1, 2]) {
+      if (!(await testidPresent(dash, `crisis-strip-move-member-${n}`))) continue
+      await dash.selectOption(`[data-testid="crisis-strip-move-member-${n}"]`, { index: 1 }).catch(() => {})
+      const opts = await dash.locator(`[data-testid="crisis-strip-move-dest-${n}"] option`).allTextContents()
+      if (opts.some(t => /replaces a bot/.test(t))) sawReplacesBot = true
+    }
+    check(sawReplacesBot, '(17b) a full-with-bots group appears in the move picker as "(replaces a bot)"')
+
+    // (17d) Part D — the single "Start class" button, enabled (2 full groups ready), gives a summary.
+    check(await testidPresent(dash, 'crisis-start-class'), '(17d) "Start class" button present in classroom')
+    check(!(await dash.locator('[data-testid="crisis-start-class"]').isDisabled()), '(17d) Start class ENABLED when full groups are ready')
+    await dash.click('[data-testid="crisis-start-class"]')
+    await dash.waitForSelector('[data-testid="crisis-start-class-summary"]', { timeout: 10000 }).catch(() => {})
+    check(/2 started/.test(await dash.textContent('[data-testid="crisis-start-class-summary"]')), '(17d) Start class started both full groups (inline summary)')
+    await dash.close()
+
+    // (17c) Part C — fill-with-bots VISIBLE on a freshly created new-group with 1 human (classroom).
+    const gid2 = 'ui-o25-newfill'
+    await fsWrite(gid2, 'config/main', { clock_mode: 'on' })
+    await fetch(`${FUNCTIONS}/seedGroupForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid2, group_id: 'gg', player_participants: ['p0', 'p1', 'p2'] }) })
+    await callFn('moveSeat', { _dev: { game_instance_id: gid2 }, participant_id: 'p0', target_group_id: 'new' }) // new group: 1 human, 2 empty
+    const d2 = await ctx.newPage()
+    await d2.goto(`${FE}/dashboard?_dev_game_instance_id=${gid2}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await d2.waitForSelector('[data-testid^="crisis-strip-fill-"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2000)
+    check(await d2.locator('[data-testid^="crisis-strip-fill-"]').first().isVisible(), '(17c) classroom new-group with 1 human (2 empty) shows a VISIBLE fill-with-bots button')
+    // (17e) Part D — Start class ABSENT in online mode
+    const ogid = 'ui-o25-online'
+    await fsWrite(ogid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await fsWrite(ogid, `participants/o${i}`, { participant_id: `o${i}`, game_instance_id: ogid, role: 'player', is_bot: false, prep_status: 'complete', name: `O ${i}`, email: `o${i}@ex.edu` })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: ogid } })
+    const od = await ctx.newPage()
+    await od.goto(`${FE}/dashboard?_dev_game_instance_id=${ogid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await od.waitForSelector('[data-testid="crisis-summary-row-1"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2500)
+    check(!(await testidPresent(od, 'crisis-start-class')), '(17e) "Start class" button ABSENT in online mode')
+    await od.close(); await d2.close()
+  }
+
+  // (18) O2.5E(b) — the full latecomer flow: match (all started) → late sync → No Group → "→ New
+  // group" → fill-with-bots → Start class again → ONLY the new group starts → the latecomer plays.
+  banner('(18) O2.5E(b) — latecomer end-to-end (new group → fill → Start class again → plays)')
+  {
+    const gid = 'ui-o25-late'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' })
+    await fetch(`${FUNCTIONS}/seedRosterForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, participant_ids: ['s0', 's1', 's2'] }) })
+    await callFn('triggerMatching', { _dev: { game_instance_id: gid } }) // exactly 3 → 1 full-human group, no bots
+    const dash = await ctx.newPage()
+    dash.on('dialog', d => d.accept())
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="crisis-start-class"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2500)
+    await dash.click('[data-testid="crisis-start-class"]') // all groups running
+    await dash.waitForSelector('[data-testid="crisis-start-class-summary"]', { timeout: 10000 }).catch(() => {})
+    check(/1 started/.test(await dash.textContent('[data-testid="crisis-start-class-summary"]')), '(18) first Start class runs the matched group')
+
+    // a late student syncs into the roster (role-less, no group — what makeSyncRoster creates)
+    await fsWrite(gid, 'participants/late', { participant_id: 'late', game_instance_id: gid, name: 'Late Larry', email: 'late@ex.edu' })
+    await dash.waitForSelector('[data-testid="crisis-nogroup-row"]', { timeout: 12000 }).catch(() => {})
+    check(await testidPresent(dash, 'crisis-nogroup-row'), '(18) the latecomer appears in the No Group pool')
+    check(await testidPresent(dash, 'crisis-nogroup-move-late'), '(18) the latecomer has a place-in control')
+
+    // path (b): "→ New group" with the latecomer, then fill-with-bots (visible, Part C)
+    await dash.selectOption('[data-testid="crisis-nogroup-move-late"]', '__new__')
+    await dash.waitForFunction(() => !document.querySelector('[data-testid="crisis-nogroup-row"]'), null, { timeout: 10000 }).catch(() => {})
+    await dash.waitForSelector('[data-testid^="crisis-strip-fill-"]', { timeout: 12000 }).catch(() => {})
+    check(await dash.locator('[data-testid^="crisis-strip-fill-"]').first().isVisible(), '(18) the new group offers a VISIBLE fill-with-bots button')
+    await dash.locator('[data-testid^="crisis-strip-fill-"]').first().click() // fill → new group full (1 human + 2 bots)
+    await sleep(2800)
+
+    // press Start class AGAIN → only the new group starts; running groups untouched
+    await dash.click('[data-testid="crisis-start-class"]')
+    await sleep(1500)
+    const sum2 = await dash.textContent('[data-testid="crisis-start-class-summary"]')
+    check(/1 started/.test(sum2) && /already running/i.test(sum2), `(18) second Start class: ONLY the new group starts, running untouched [${sum2}]`)
+    await dash.close()
+
+    // the latecomer plays: their group is running, they are a seat, and their action is accepted
+    const lg = await fetch(`${FIRESTORE}/game_instances/${gid}/participants/late`, { headers: { Authorization: 'Bearer owner' } }).then(r => r.json())
+    const lateGid = lg.fields?.group_id?.stringValue
+    check(!!lateGid, '(18) the latecomer is now in a group')
+    const iv = (await callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: lateGid })).result
+    check(iv.status === 'in_progress' && iv.seats.some(s => s.participantId === 'late'), '(18) the latecomer\'s new group is running and they are a seat')
+    const lateSeat = iv.seats.find(s => s.participantId === 'late')
+    let played = false
+    if (iv.pendingSeats.includes(lateSeat.seat)) {
+      const base = { _test: { participant_id: 'late', game_instance_id: gid }, group_id: lateGid }
+      if (iv.stage === 'bidding') played = (await callFn('submitBid', { ...base, bid: 15 })).ok
+      else if (iv.stage === 'allocation') played = (await callFn('submitAllocation', { ...base, a1: 50, a2: 50 })).ok
+      else if (iv.stage === 'fixing') played = (await callFn('submitFix', { ...base, fixed: true })).ok
+    } else played = true // the late seat already acted / is a non-owing seat this stage
+    check(played, '(18) the latecomer plays a round (their decision is accepted)')
   }
 
   await browser.close()

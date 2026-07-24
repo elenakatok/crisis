@@ -202,6 +202,12 @@ export const getCrisisDashboard = () =>
 export const openRound = (groupId: string) =>
   callFn<{ ok: boolean; round: number; stage: Stage; clockEnabled: boolean }>('openRound', { group_id: groupId })
 
+/** §O2.5D "Start class" (classroom only): open round 1 for every not-started FULL group. Idempotent
+ *  + re-pressable — a later press starts groups that became ready since. Returns per-group results. */
+export type StartGroupResult = { groupId: string; groupNumber: number; result: 'started' | 'skipped_short' | 'already_running'; size?: number }
+export const startAllGroups = () =>
+  callFn<{ ok: boolean; started: number; skipped_short: number; already_running: number; groups: StartGroupResult[] }>('startAllGroups', {})
+
 // ── Reports (Slice 7) — read-only, from the frozen finished state; bots excluded ──
 
 export type ChartPoint = { period: number; s1Units: number; s2Units: number; s1Price: number; s2Price: number }
@@ -352,9 +358,10 @@ export const groupParticipantsOnline = () =>
 export const getOnlineGroups = () =>
   callFn<{ ok: boolean; clock_mode: string; groups: OnlineGroup[] }>('getOnlineGroups', {})
 
-/** Move a human into another group with a free seat (online; rejected once a group locks). */
+/** Move a human into another group (both modes; rejected once a group locks). If the destination is
+ *  full but has a bot seat, the move EVICTS one bot (§O2.5B) — evicted_bot names it. */
 export const moveSeat = (participantId: string, targetGroupId: string) =>
-  callFn<{ ok: boolean; moved: boolean }>('moveSeat', { participant_id: participantId, target_group_id: targetGroupId })
+  callFn<{ ok: boolean; moved: boolean; evicted_bot?: string | null }>('moveSeat', { participant_id: participantId, target_group_id: targetGroupId })
 
 /** Fill a group's empty seats with bot seat-fillers so a short group can play (online). */
 export const topUpGroupWithBots = (groupId: string) =>
