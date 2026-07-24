@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { doc, onSnapshot } from 'firebase/firestore'
 import { colors, typography, layout, spacing } from '@mygames/game-ui'
+import { db } from '../firebase'
 import {
   getRoundView, submitBid, submitAllocation, submitFix,
   type SeatView, type Role,
@@ -86,21 +88,9 @@ export default function CrisisGame({
     setSubmitting(false)
   }
 
-  // ── pre-game: instructor hasn't started the round yet ──────────────────────────
+  // ── pre-game: the round hasn't opened yet — mode-branched copy (§O2 fix) ──────────
   if (notStarted || view === null) {
-    return (
-      <>
-        {/* Online only + pre-round-1 only; renders null in classroom and once the round starts. */}
-        <OnlineMembersStrip participantId={participantId} gameInstanceId={gameInstanceId} groupId={groupId} />
-        <main style={page}>
-          <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
-          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
-            Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
-            assigned when it begins. Keep this tab open.
-          </p>
-        </main>
-      </>
-    )
+    return <PreGameWaiting participantId={participantId} gameInstanceId={gameInstanceId} groupId={groupId} />
   }
 
   const roleLabel = ROLE_LABEL[view.role]
@@ -287,6 +277,52 @@ function waitingBanner(waitingOnYou: number) {
 
 function ErrorNote({ msg }: { msg: string }) {
   return <p data-testid="crisis-submit-error" role="alert" style={{ color: '#b91c1c', marginTop: spacing.gapSm }}>{msg}</p>
+}
+
+// ── The post-reveal / pre-round-1 waiting screen. Copy is MODE-BRANCHED off the group doc,
+// read LIVE (onSnapshot) so it is never a stale login-time value: an online-formed group carries
+// members[] (classroom groups never do). Online also shows a live "N of M are here" arrival count
+// (bot seats count as present; a human is "here" once their poll has registered in `arrived`). ──
+function PreGameWaiting({ participantId, gameInstanceId, groupId }: { participantId: string; gameInstanceId: string; groupId: string }) {
+  const [g, setG] = useState<Record<string, unknown> | null>(null)
+  useEffect(() => {
+    const ref = doc(db, 'game_instances', gameInstanceId, 'groups', groupId)
+    const unsub = onSnapshot(ref, (s) => setG(s.exists() ? s.data() : {}), () => setG({}))
+    return () => unsub()
+  }, [gameInstanceId, groupId])
+
+  const online = Array.isArray(g?.members)
+  const members = (g?.members as { participant_id: string }[] | undefined) ?? []
+  const arrived = new Set((g?.arrived as string[] | undefined) ?? [])
+  const botCount = ((g?.bot_participants as string[] | undefined) ?? []).length
+  const total = ((g?.player_participants as string[] | undefined) ?? []).length
+  const present = members.filter(m => arrived.has(m.participant_id)).length + botCount
+  const haveCount = online && total > 0
+
+  return (
+    <>
+      {/* Online only + pre-round-1 only; renders null in classroom and once the round starts. */}
+      <OnlineMembersStrip participantId={participantId} gameInstanceId={gameInstanceId} groupId={groupId} />
+      <main style={page}>
+        <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
+        {online ? (
+          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
+            {haveCount && (
+              <><strong data-testid="crisis-waiting-count">{present} of {total}</strong> group members {present === 1 ? 'is' : 'are'} here. </>
+            )}
+            Waiting for your other group members to arrive. The game starts automatically when
+            everyone is here. Your role — Buyer or Seller — will be assigned when it begins. Keep
+            this tab open.
+          </p>
+        ) : (
+          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
+            Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
+            assigned when it begins. Keep this tab open.
+          </p>
+        )}
+      </main>
+    </>
+  )
 }
 
 function HistorySection({ history, viewerRole }: { history: import('../api').RoundRecord[]; viewerRole?: import('../api').Role }) {

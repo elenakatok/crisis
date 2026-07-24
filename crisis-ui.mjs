@@ -455,6 +455,13 @@ async function main() {
     await p1.waitForSelector('[data-testid="crisis-members-strip"]', { timeout: 8000 }).catch(() => {})
     check(await testidPresent(p1, 'crisis-members-strip'), '(10) persistent members strip shows before round 1')
 
+    // ONLINE waiting copy — auto-start text + live arrival count; NOT the classroom "instructor" copy
+    await p1.waitForSelector('[data-testid="crisis-waiting-count"]', { timeout: 8000 }).catch(() => {})
+    const waitText = await p1.textContent('[data-testid="crisis-waiting-start"]')
+    check(/starts automatically/i.test(waitText) && /of 3/.test(waitText), '(10) online waiting screen shows the auto-start copy + live "N of 3" arrival count')
+    check(!/waiting for your instructor/i.test(waitText), '(10) online waiting screen does NOT show the classroom "instructor" copy')
+    check(await p1.locator('[data-testid="crisis-waiting-start"]').isVisible(), '(10) online waiting text is visible in the viewport')
+
     // instructor opens the round (clock off) → student plays; strip disappears once round active
     await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: groupId })
     await p1.waitForFunction(() => !!window.__crisisState, null, { timeout: 20000 }).catch(() => {})
@@ -480,6 +487,17 @@ async function main() {
     check(!(await testidPresent(pk, 'crisis-online-reveal')), '(10b) continue dismisses the reveal')
     check(!(await testidPresent(pk, 'crisis-waiting-start')), '(10b) continue lands in the info/KC flow, NOT the game (reveal precedes KC)')
     await pk.close()
+
+    // (10c) CLASSROOM pre-game waiting screen keeps the "instructor" copy, byte-identical
+    const cgid = 'ui-classroom-wait'; await seedGroup(cgid) // seeded matched group, round NOT opened
+    const cp = await ctx.newPage()
+    await cp.goto(studentUrl(cgid, 'pa'))
+    await cp.waitForSelector('[data-testid="crisis-waiting-start"]', { timeout: 30000 }).catch(() => {})
+    const cText = await cp.textContent('[data-testid="crisis-waiting-start"]')
+    check(/waiting for your instructor to start the game/i.test(cText), '(10c) classroom pre-game shows the "instructor" copy (unchanged)')
+    check(!/starts automatically/i.test(cText), '(10c) classroom pre-game does NOT show the online auto-start copy')
+    check(!(await testidPresent(cp, 'crisis-waiting-count')), '(10c) classroom pre-game shows no online arrival count')
+    await cp.close()
   }
 
   // (11) O2.1 — mode switch (+ guard), ONE match control per mode, strip actions, grouped header
