@@ -92,6 +92,31 @@ function buildMembership(playerPids: string[], botPids: Set<string>, dataById: M
   return { members, member_logins, lead: firstHuman(playerPids, botPids) }
 }
 
+/**
+ * The group-doc fields to write for a membership change (§O2.4, both modes). player_participants +
+ * lead ALWAYS. members[]/member_logins are ONLY maintained when the group ALREADY carries them —
+ * i.e. an online-formed group. They are NEVER fabricated on a classroom/triggerMatching group
+ * (whose display names live in the RTDB attending overlay, and whose absence of members[] is the
+ * very signal the reveal gate keys on). `existing` = the group's current data (null for a fresh
+ * group); pass `forceMembers` to seed members[] on a brand-new online group.
+ */
+function membership(
+  existing: Record<string, unknown> | null | undefined,
+  playerPids: string[],
+  botPids: Set<string>,
+  dataById: Map<string, Record<string, unknown>>,
+  forceMembers = false,
+) {
+  const lead = firstHuman(playerPids, botPids)
+  const fields: Record<string, unknown> = { player_participants: playerPids, lead_participant_id: lead }
+  if (forceMembers || Array.isArray(existing?.['members'])) {
+    const m = buildMembership(playerPids, botPids, dataById)
+    fields['members'] = m.members
+    fields['member_logins'] = m.member_logins
+  }
+  return { fields, lead }
+}
+
 // ── groupParticipantsOnline (instructor) ─────────────────────────────────────────
 async function groupOnlineCore(gameInstanceId: string) {
   const db = admin.firestore()
@@ -290,12 +315,8 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
-  // Online-only guard (read outside the tx; clock_mode does not change under a move).
-  const configSnap = await instanceRef.collection('config').doc('main').get()
-  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
-    throw new HttpsError('failed-precondition', 'Seat moves are an online-mode action.')
-  }
-
+  // §O2.4: works in BOTH modes. The only guards are per-group locks (below). members[] is
+  // maintained per group ONLY when present (online groups) — never fabricated on a classroom group.
   return db.runTransaction(async (tx) => {
     // ── reads first ──
     const pRef = instanceRef.collection('participants').doc(participantId)
@@ -335,16 +356,16 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
     const humanSnaps = humanPids.length ? await tx.getAll(...humanPids.map((id) => instanceRef.collection('participants').doc(id))) : []
     const dataById = new Map<string, Record<string, unknown>>(humanSnaps.map((s) => [s.id, (s.data() ?? {}) as Record<string, unknown>]))
 
-    const tgt = buildMembership(newTarget, targetBots, dataById)
+    const tgt = membership(target, newTarget, targetBots, dataById)
 
-    // ── writes ──
+    // ── writes ── (members[] only where the group already has it — see membership())
     if (sourceRef && source) {
-      const src = buildMembership(newSource, sourceBots, dataById)
+      const src = membership(source, newSource, sourceBots, dataById)
       // Source group — left standing even if now empty (§4.4: an emptied group costs nothing).
-      tx.update(sourceRef, { player_participants: newSource, lead_participant_id: src.lead, members: src.members, member_logins: src.member_logins })
+      tx.update(sourceRef, src.fields)
       for (const pid of newSource) if (!sourceBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
     }
-    tx.update(targetRef, { player_participants: newTarget, lead_participant_id: tgt.lead, members: tgt.members, member_logins: tgt.member_logins })
+    tx.update(targetRef, tgt.fields)
 
     // The moved/placed participant → target group. role:'player' covers a late/role-less No Group
     // student (idempotent for an already-roled student).
@@ -363,11 +384,7 @@ async function ungroupCore(gameInstanceId: string, participantId: string) {
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
-  const configSnap = await instanceRef.collection('config').doc('main').get()
-  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
-    throw new HttpsError('failed-precondition', 'Removing a student from a group is an online-mode action.')
-  }
-
+  // §O2.4: works in BOTH modes. Only the per-group lock guard applies.
   return db.runTransaction(async (tx) => {
     const pRef = instanceRef.collection('participants').doc(participantId)
     const pSnap = await tx.get(pRef)
@@ -393,15 +410,10 @@ async function ungroupCore(gameInstanceId: string, participantId: string) {
     const humanPids = newSource.filter((x) => !sourceBots.has(x))
     const humanSnaps = humanPids.length ? await tx.getAll(...humanPids.map((id) => instanceRef.collection('participants').doc(id))) : []
     const dataById = new Map<string, Record<string, unknown>>(humanSnaps.map((s) => [s.id, (s.data() ?? {}) as Record<string, unknown>]))
-    const src = buildMembership(newSource, sourceBots, dataById)
+    const src = membership(source, newSource, sourceBots, dataById) // members[] only if present
 
     // Group stays standing with the seat now empty; lead recomputed over whoever remains.
-    tx.update(sourceRef, {
-      player_participants: newSource,
-      lead_participant_id: src.lead,
-      members: src.members,
-      member_logins: src.member_logins,
-    })
+    tx.update(sourceRef, src.fields)
     tx.update(pRef, { group_id: null, is_lead: false })
     for (const pid of newSource) if (!sourceBots.has(pid)) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
 
@@ -418,10 +430,11 @@ async function createNewGroupCore(gameInstanceId: string, participantId: string)
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
+  // §O2.4: works in BOTH modes. The new group carries members[] only in ONLINE mode (so it matches
+  // an O1-generated group); a classroom new group is shaped like a triggerMatching group (no
+  // members[]). clock_mode is read only to decide that — never to reject.
   const configSnap = await instanceRef.collection('config').doc('main').get()
-  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
-    throw new HttpsError('failed-precondition', 'Creating a group is an online-mode action.')
-  }
+  const online = String(configSnap.data()?.['clock_mode'] ?? 'on') === 'off'
 
   return db.runTransaction(async (tx) => {
     // ── reads first (Firestore: all reads before any writes) ──
@@ -453,27 +466,25 @@ async function createNewGroupCore(gameInstanceId: string, participantId: string)
     // ── writes ──
     const newGroupId = randomUUID()
     const now = FieldValue.serverTimestamp()
-    const nm = buildMembership([participantId], new Set(), new Map([[participantId, p]]))
+    // forceMembers = online → the new group carries members[] (matches an O1 group); classroom → none.
+    const nm = membership(null, [participantId], new Set(), new Map([[participantId, p]]), online)
     tx.set(instanceRef.collection('groups').doc(newGroupId), {
       group_id: newGroupId,
       game_instance_id: gameInstanceId,
-      player_participants: [participantId],
       bot_participants: [],
       bot_count: 0,
       bot_types: {},
-      lead_participant_id: participantId,
-      members: nm.members,
-      member_logins: nm.member_logins,
       outcome: null,
       status: 'matched',
       matched_at: now,
+      ...nm.fields, // player_participants + lead_participant_id (+ members/member_logins if online)
     })
     tx.update(pRef, { group_id: newGroupId, is_lead: true, role: 'player' })
 
     if (source && sourceRef) {
       const sourceBots = new Set((source['bot_participants'] as string[] | undefined) ?? [])
-      const src = buildMembership(newSource, sourceBots, sourceHumanData)
-      tx.update(sourceRef, { player_participants: newSource, lead_participant_id: src.lead, members: src.members, member_logins: src.member_logins })
+      const src = membership(source, newSource, sourceBots, sourceHumanData) // members[] only if present
+      tx.update(sourceRef, src.fields)
       for (const pid of newSource) if (!sourceBots.has(pid)) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
     }
 
@@ -497,19 +508,14 @@ export const moveSeat = onCall(CORS, async (request: CallableRequest) => {
 // ── topUpGroupWithBots (instructor) ──────────────────────────────────────────────
 // Fill a group's empty seats with server bot seat-fillers so a short group (1–2 humans) can
 // play. Reuses THE bot creation path (makeBotSeat) and the once-at-fill fixed-type draw
-// (drawBotType) — no second copy of decide() or the bot doc shape. Online-only; refused on a
-// locked group.
+// (drawBotType) — no second copy of decide() or the bot doc shape. §O2.4: BOTH modes; refused
+// only on a locked group. Touches only the bot arrays — members[] (humans) is untouched, so a
+// classroom group stays members[]-free.
 async function topUpCore(gameInstanceId: string, groupId: string) {
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
-  const [configSnap, groupSnap] = await Promise.all([
-    instanceRef.collection('config').doc('main').get(),
-    instanceRef.collection('groups').doc(groupId).get(),
-  ])
-  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
-    throw new HttpsError('failed-precondition', 'Bot top-up is an online-mode action.')
-  }
+  const groupSnap = await instanceRef.collection('groups').doc(groupId).get()
   if (!groupSnap.exists) throw new HttpsError('not-found', 'Group not found.')
   const g = groupSnap.data() as Record<string, unknown>
   if (g['seats_locked_at'] != null) {

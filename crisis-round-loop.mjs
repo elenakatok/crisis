@@ -1192,6 +1192,61 @@ async function main() {
     check((await groupOnline(gid)).ok, '(O12) an empty group never blocks re-group')
   }
 
+  // (O13) O2.4 — the strip callables work on CLASSROOM-formed groups (no members[]) and never
+  // fabricate members[]; per-group lock guard still applies; mixed-instance groups coexist.
+  banner('(O13) O2.4 — move/ungroup/fill/new-group on classroom-formed groups (no members[])')
+  {
+    const gid = 'o2-classroom'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' }) // CLASSROOM
+    await seedG(gid, 'cg1', ['c0', 'c1', 'c2']) // seedGroupForTest → NO members[]
+    check((await groupDoc(gid, 'cg1')).members === undefined, '(O13) a classroom-formed group has NO members[]')
+
+    // ungroup c0 → cg1 down to 2, still NO members[] (never fabricated); c0 → No Group pool
+    const un = await moveSeatFn(gid, 'c0', '')
+    check(un.ok && un.result.removed, '(O13) ungroup works in CLASSROOM mode')
+    const cg1 = await groupDoc(gid, 'cg1')
+    check(arrVal(cg1.player_participants).length === 2 && cg1.members === undefined, '(O13) classroom group → 2, members[] NOT fabricated')
+    check((await fsGet(gid, 'participants/c0')).fields.group_id?.stringValue === undefined, '(O13) c0 group_id cleared')
+    const dash = (await callFn('getCrisisDashboard', asDev(gid))).result
+    check(dash.noGroup.some(p => p.participant_id === 'c0'), '(O13) c0 appears in the No Group pool (classroom)')
+    check(dash.names && dash.names['c0'] !== undefined, '(O13) getCrisisDashboard.names resolves the classroom picker name for c0')
+
+    // "→ New group" in classroom → new group WITHOUT members[] (matches triggerMatching shape)
+    const nw = await moveSeatFn(gid, 'c0', 'new')
+    check(nw.ok && nw.result.created, '(O13) "→ New group" works in classroom')
+    const ngid = nw.result.new_group
+    check((await groupDoc(gid, ngid)).members === undefined, '(O13) classroom new group has NO members[] (triggerMatching shape)')
+    // move c1 into it → 2; bot-fill → 3; opens with the clock ON
+    check((await moveSeatFn(gid, 'c1', ngid)).result.moved, '(O13) move between two classroom groups works')
+    const tf = await topUpFn(gid, ngid)
+    check(tf.ok && tf.result.added === 1 && (await groupDoc(gid, ngid)).members === undefined, '(O13) bot-fill works, still no members[] on the classroom group')
+    const o = await openG(gid, ngid, 1)
+    check(o.ok && o.result.ok && o.result.clockEnabled === true, '(O13) classroom-formed group opens with the clock ON')
+
+    // per-group lock guard still applies in classroom
+    await seedG(gid, 'cg3', ['d0', 'd1', 'd2'])
+    await openG(gid, 'cg3', 1)
+    const rm = await roleMapG(gid, 'cg3')
+    await bidG(gid, 'cg3', rm.seller1, 15) // first submission → locks
+    const rej = await moveSeatFn(gid, 'd0', '') // ungroup out of a locked group → source-lock guard
+    check(!rej.ok && /lock/i.test(rej.error || ''), '(O13) per-group lock guard applies in classroom (move out of a locked group rejected)')
+
+    // ── mixed instance: an online group (members[]) + a classroom group (no members[]) coexist ──
+    const mgid = 'o2-mixed'
+    await fsWrite(mgid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(mgid, `w${i}`, `W ${i}`, `w${i}@ex.edu`)
+    await groupOnline(mgid) // online group WITH members[]
+    const onlineG = (await onlineGroups(mgid)).groups[0]
+    await seedG(mgid, 'clsg', ['x0', 'x1', 'x2']) // classroom-shaped group (no members[]) in the same instance
+    check((await groupDoc(mgid, 'clsg')).members === undefined && (await groupDoc(mgid, onlineG.group_id)).members !== undefined, '(O13) mixed: classroom group has no members[]; online group has members[]')
+    await moveSeatFn(mgid, 'x0', '') // free a seat in clsg (→ 2)
+    const mvMixed = await moveSeatFn(mgid, onlineG.members[0].participant_id, 'clsg') // online student → classroom group
+    check(mvMixed.ok && mvMixed.result.moved, '(O13) mixed: move an online student into a classroom group')
+    check((await groupDoc(mgid, 'clsg')).members === undefined, '(O13) mixed: classroom target stays members[]-free (no fabrication)')
+    const srcDoc = await groupDoc(mgid, onlineG.group_id)
+    check(srcDoc.members !== undefined && membersRaw(srcDoc).length === 2, '(O13) mixed: online source keeps members[] (rebuilt to 2)')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

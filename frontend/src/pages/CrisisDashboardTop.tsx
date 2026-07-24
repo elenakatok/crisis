@@ -42,6 +42,7 @@ export default function CrisisDashboardTop() {
   const [groups, setGroups] = useState<DashboardGroup[]>([])
   const [live, setLive] = useState<Record<string, LiveGroup>>({})
   const [noGroup, setNoGroup] = useState<{ participant_id: string; name: string }[]>([])
+  const [names, setNames] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -56,7 +57,7 @@ export default function CrisisDashboardTop() {
     return () => { node.remove(); setHost(null) }
   }, [])
 
-  // clock_mode + per-group status (the §4A poll already returns both).
+  // clock_mode + per-group status + the pid→name map (§O2.4: names for the classroom picker).
   useEffect(() => {
     let alive = true
     const tick = () => getCrisisDashboard().then(r => {
@@ -64,6 +65,7 @@ export default function CrisisDashboardTop() {
       setClock(r.clock_mode === 'off' ? 'off' : 'on')
       setGroups(r.groups)
       setNoGroup(r.noGroup ?? [])
+      setNames(r.names ?? {})
     }).catch(() => {})
     tick()
     const id = setInterval(tick, 2500)
@@ -72,9 +74,10 @@ export default function CrisisDashboardTop() {
 
   const online = clockMode === 'off'
 
-  // Live membership/lock for the online actions.
+  // Live membership/lock — §O2.4: runs in BOTH modes (classroom groups exist too). Gated on the
+  // clock_mode poll having landed (⇒ instructor auth ready ⇒ uid available), not on the mode.
   useEffect(() => {
-    if (!online) { setLive({}); return }
+    if (clockMode === null) return
     const uid = auth.currentUser?.uid ?? ''
     const gid = uid.startsWith('instructor_') ? uid.slice('instructor_'.length) : ''
     if (!gid) return
@@ -93,7 +96,7 @@ export default function CrisisDashboardTop() {
       setLive(m)
     }, () => { /* transient; the poll keeps status fresh */ })
     return () => unsub()
-  }, [online])
+  }, [clockMode])
 
   const anyStarted = useMemo(() => groups.some(g => g.status !== 'not_started'), [groups])
   const numberById = useMemo(() => new Map(groups.map(g => [g.groupId, g.groupNumber])), [groups])
@@ -163,23 +166,24 @@ export default function CrisisDashboardTop() {
                 <span style={{ fontSize: typography.sizeSm, color: g.status === 'in_progress' ? colors.successText : colors.textSecondary }}>
                   {g.status === 'in_progress' && '● '}{statusLine(g)}
                 </span>
-                {online && (
-                  <StripActions
-                    g={g}
-                    live={live[g.groupId]}
-                    destinations={destinations}
-                    onMove={async (pid, dest) => { setError(null); try { await moveSeat(pid, dest) } catch (e) { setError(`Move: ${e instanceof Error ? e.message : 'failed'}`) } }}
-                    onFill={async () => { setError(null); try { await topUpGroupWithBots(g.groupId) } catch (e) { setError(`Fill: ${e instanceof Error ? e.message : 'failed'}`) } }}
-                  />
-                )}
+                {/* §O2.4: per-group actions in BOTH modes (locked/started groups show 🔒). */}
+                <StripActions
+                  g={g}
+                  live={live[g.groupId]}
+                  names={names}
+                  destinations={destinations}
+                  onMove={async (pid, dest) => { setError(null); try { await moveSeat(pid, dest) } catch (e) { setError(`Move: ${e instanceof Error ? e.message : 'failed'}`) } }}
+                  onFill={async () => { setError(null); try { await topUpGroupWithBots(g.groupId) } catch (e) { setError(`Fill: ${e instanceof Error ? e.message : 'failed'}`) } }}
+                />
               </div>
             ))}
           </div>
         )}
 
-        {/* No Group pool (§O2.3) — ungrouped (removed / late) students, name only. Hidden when
-            empty. Each can be placed into a group with a free seat or into a NEW group. */}
-        {online && noGroup.length > 0 && (
+        {/* No Group pool (§O2.3, both modes §O2.4) — ungrouped (removed / late / missed-matching)
+            students, name only. Placeable into a free seat or a NEW group. Only shown once groups
+            EXIST (before matching/grouping, everyone is ungrouped — that is not the stranded case). */}
+        {groups.length > 0 && noGroup.length > 0 && (
           <div data-testid="crisis-nogroup-row" style={{ marginTop: spacing.gapMd, paddingTop: spacing.gapSm, borderTop: `1px solid ${colors.borderMid}`, display: 'flex', alignItems: 'baseline', gap: spacing.gapMd, flexWrap: 'wrap' }}>
             <span style={{ minWidth: 70, fontWeight: 600, color: colors.textSecondary }}>No group ({noGroup.length})</span>
             {noGroup.map(p => (
@@ -229,10 +233,11 @@ function NoGroupMember({
 // member names on the line itself — names appear only inside the move picker (unavoidable to
 // choose whom to move). Locked groups → disabled with a tooltip.
 function StripActions({
-  g, live, destinations, onMove, onFill,
+  g, live, names, destinations, onMove, onFill,
 }: {
   g: DashboardGroup
   live?: LiveGroup
+  names: Record<string, string>
   destinations: { id: string; n: number | null }[]
   onMove: (pid: string, dest: string) => void
   onFill: () => void
@@ -243,12 +248,17 @@ function StripActions({
   const locked = live.seats_locked_at != null
   const emptySeats = 3 - live.player_participants.length
   const otherDests = destinations.filter(d => d.id !== g.groupId)
+  // §O2.4: the human members from player_participants (live) with names from the pid→name map —
+  // works for classroom groups (no members[]) as well as online ones. Names resolve from the poll.
+  const humanMembers = live.player_participants
+    .filter(pid => !live.bot_participants.includes(pid))
+    .map(pid => ({ participant_id: pid, display_name: names[pid] ?? pid }))
 
   // Destination handler: a real group id moves the member; the special "__remove__" value ungroups
   // them (moveSeat with an empty target — the seat becomes empty). Remove is confirmed first.
   const doDest = async (dest: string) => {
     if (!member) return
-    const name = live?.members.find(m => m.participant_id === member)?.display_name ?? 'this student'
+    const name = humanMembers.find(m => m.participant_id === member)?.display_name ?? 'this student'
     if (dest === '__remove__') {
       if (!window.confirm(`Remove ${name} from Group ${g.groupNumber}? Their seat becomes empty.`)) return
       setBusy(true); await onMove(member, ''); setMember(''); setBusy(false); return // '' target = ungroup
@@ -270,7 +280,7 @@ function StripActions({
   // so every line rendered an empty span). When no other group has a free seat the destination
   // dropdown says so; it becomes usable the moment a seat opens. Fill shows only when this group
   // actually has empty seats.
-  const hasMembers = live.members.length > 0
+  const hasMembers = humanMembers.length > 0
 
   return (
     <span data-testid={`crisis-strip-actions-${g.groupNumber}`} style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm, flexWrap: 'wrap' }}>
@@ -278,7 +288,7 @@ function StripActions({
         <>
           <select data-testid={`crisis-strip-move-member-${g.groupNumber}`} value={member} disabled={busy} onChange={e => setMember(e.target.value)} style={{ fontSize: typography.sizeXs }}>
             <option value="">Move member…</option>
-            {live.members.map(m => <option key={m.participant_id} value={m.participant_id}>{m.display_name}</option>)}
+            {humanMembers.map(m => <option key={m.participant_id} value={m.participant_id}>{m.display_name}</option>)}
           </select>
           {/* Enabled whenever a member is picked — "Remove from group" is always available even
               when no group has a free seat (the full-class case). */}

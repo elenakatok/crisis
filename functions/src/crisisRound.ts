@@ -531,6 +531,12 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
     .filter((p) => { const d = p.data() as Record<string, unknown>; return d['is_bot'] !== true && d['group_id'] == null })
     .map((p) => ({ participant_id: p.id, name: meta.get(p.id)?.name ?? p.id }))
 
+  // pid → display name for ALL participants (§O2.4): the classroom strip move picker resolves
+  // member names from here — classroom groups carry no members[], and names live in RTDB attending
+  // which the client is not given. No new RTDB read: names come from the participant docs read above.
+  const names: Record<string, string> = {}
+  for (const [pid, m] of meta) names[pid] = m.name
+
   const roundByGroup = new Map<string, StoredDoc>()
   for (const r of roundsSnap.docs) roundByGroup.set(r.id, r.data() as StoredDoc)
 
@@ -578,7 +584,7 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
   }).sort((a, b) => (a.groupNumber ?? Infinity) - (b.groupNumber ?? Infinity))
 
   // clock_mode lets the Live view hide "Start game" online (auto-open handles round 1).
-  return { ok: true as const, clock_mode: clockMode, groups, noGroup }
+  return { ok: true as const, clock_mode: clockMode, groups, noGroup, names }
 })
 
 // ── on FINISH: denormalize participation metadata + mark the group completed ──────

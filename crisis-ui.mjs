@@ -770,6 +770,56 @@ async function main() {
     await dc.close()
   }
 
+  // (14) O2.4 — the strip's per-group actions work in CLASSROOM mode on a classroom-FORMED
+  // group (seedGroupForTest → player_participants, NO members[]). Names for the move picker
+  // resolve from getCrisisDashboard.names (participant docs), since classroom groups carry no
+  // members[] and names otherwise live only in the RTDB attending overlay.
+  banner('(14) O2.4 — strip actions + name picker + No Group pool in CLASSROOM mode')
+  {
+    const gid = 'ui-o24-classroom'
+    await fsWrite(gid, 'config/main', { clock_mode: 'on' }) // CLASSROOM
+    const seedClassroom = async (group, pids, base) => {
+      await fetch(`${FUNCTIONS}/seedGroupForTest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ game_instance_id: gid, group_id: group, player_participants: pids }) })
+      for (let i = 0; i < pids.length; i++) await fsWrite(gid, `participants/${pids[i]}`, { participant_id: pids[i], game_instance_id: gid, role: 'player', is_bot: false, prep_status: 'complete', name: `${base} ${i}`, email: `${pids[i]}@ex.edu`, group_id: group })
+    }
+    await seedClassroom('g', ['k0', 'k1', 'k2'], 'Kappa') // group 1 (full)
+    await seedClassroom('g2', ['m0', 'm1', 'm2'], 'Mu')   // group 2
+    await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: 'm2', target_group_id: '' }) // free a seat in g2 + put m2 in No Group
+
+    const dash = await ctx.newPage()
+    dash.on('dialog', d => d.accept()) // auto-accept the "Create a new group…?" confirm
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="crisis-strip-move-member-1"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2500)
+
+    // (14a) strip actions VISIBLE in classroom on an unstarted, classroom-formed group (the whole point)
+    check(await testidPresent(dash, 'crisis-strip-move-member-1'), '(14a) classroom: strip move control present on a classroom-formed group')
+    check(await dash.locator('[data-testid="crisis-strip-move-member-1"]').isVisible(), '(14a) classroom: the move control is actually on-screen (not just in the DOM)')
+
+    // (14b) member names resolve in the picker (classroom groups have no members[] — names via getCrisisDashboard)
+    const opts = await dash.locator('[data-testid="crisis-strip-move-member-1"] option').allTextContents()
+    check(opts.some(t => /Kappa|Mu/.test(t)), `(14b) classroom: the move picker resolves real member names [${opts.join(' | ')}]`)
+
+    // (14c) the No Group pool works in classroom too — m2 (ungrouped) is listed with a place-in control
+    check(await testidPresent(dash, 'crisis-nogroup-row'), '(14c) classroom: No Group row appears (m2 ungrouped)')
+    check(await testidPresent(dash, 'crisis-nogroup-move-m2'), '(14c) classroom: No Group row lists m2 with a place-in control')
+
+    // (14d) place m2 via the UI → "→ New group"; the pool empties; the new classroom group plays normally
+    await dash.selectOption('[data-testid="crisis-nogroup-move-m2"]', '__new__')
+    await dash.waitForFunction(() => !document.querySelector('[data-testid="crisis-nogroup-row"]'), null, { timeout: 8000 }).catch(() => {})
+    check(!(await testidPresent(dash, 'crisis-nogroup-row')), '(14d) classroom: No Group row hidden again after placing m2 in a new group (UI-driven)')
+    await dash.close()
+
+    // a moved classroom student's game works normally: bot-fill the new solo group + open → clock ON.
+    // (m2's new group carries no members[] — read its id from the participant doc, not getOnlineGroups.)
+    const m2doc = await fetch(`${FIRESTORE}/game_instances/${gid}/participants/m2`, { headers: { Authorization: 'Bearer owner' } }).then(r => r.json())
+    const soloId = m2doc.fields?.group_id?.stringValue
+    check(!!soloId, '(14d) classroom: m2 landed in a fresh new group (participant group_id set)')
+    await callFn('topUpGroupWithBots', { _dev: { game_instance_id: gid }, group_id: soloId })
+    const opened = await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: soloId })
+    check(opened.ok && opened.result.ok && opened.result.clockEnabled === true, '(14d) classroom: the moved student\'s new group plays normally (bot-fill → opens with the clock ON)')
+  }
+
   await browser.close()
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)

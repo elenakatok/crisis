@@ -184,10 +184,11 @@ export type DashboardGroup = {
 export type NoGroupParticipant = { participant_id: string; name: string }
 
 /** The §4A live window over every group. Read-only — no controls. `clock_mode` lets the
- *  Live view hide "Start game" online (auto-open handles round 1). `noGroup` is the online
- *  ungrouped pool (name only). */
+ *  Live view hide "Start game" online (auto-open handles round 1). `noGroup` is the ungrouped
+ *  pool (name only). `names` is pid→display-name for every participant (the strip move picker
+ *  resolves names from here — classroom groups carry no members[]). */
 export const getCrisisDashboard = () =>
-  callFn<{ ok: boolean; clock_mode?: string; groups: DashboardGroup[]; noGroup?: NoGroupParticipant[] }>('getCrisisDashboard', {})
+  callFn<{ ok: boolean; clock_mode?: string; groups: DashboardGroup[]; noGroup?: NoGroupParticipant[]; names?: Record<string, string> }>('getCrisisDashboard', {})
 
 /** Launcher action (instructor is "a launcher and a finalizer"): start the round loop for a group. */
 export const openRound = (groupId: string) =>
