@@ -443,33 +443,51 @@ async function main() {
     check(!(await testidPresent(p1, 'crisis-online-holding')), '(10) not the holding screen (already grouped)')
     const revealText = await p1.textContent('[data-testid="crisis-online-reveal"]')
     check(/Ada Online/.test(revealText) && /Ben Online/.test(revealText) && /Cy Online/.test(revealText), '(10) reveal shows all three member names')
-    check(await p1.locator('[data-testid="crisis-reveal-email"]').count() === 3, '(10) reveal shows all three member emails')
-    const mailto = await p1.locator('[data-testid="crisis-reveal-email"]').first().getAttribute('href')
+    check(await p1.locator('[data-testid="crisis-member-email"]').count() === 3, '(10) reveal shows all three member emails')
+    const mailto = await p1.locator('[data-testid="crisis-member-email"]').first().getAttribute('href')
     check(/^mailto:.+@/.test(mailto || ''), '(10) member email is a mailto: link')
 
-    // continue → pre-game waiting screen + persistent members strip
+    // continue → pre-game waiting screen with the FULL member list (name + email) + per-member arrival
     await p1.click('[data-testid="crisis-reveal-continue"]')
     await p1.waitForSelector('[data-testid="crisis-waiting-start"]', { timeout: 15000 }).catch(() => {})
     check(await testidPresent(p1, 'crisis-waiting-start'), '(10) continue → pre-game waiting screen (no code screen anywhere)')
-    // the strip renders once its group-doc snapshot resolves (a tick after the screen appears)
-    await p1.waitForSelector('[data-testid="crisis-members-strip"]', { timeout: 8000 }).catch(() => {})
-    check(await testidPresent(p1, 'crisis-members-strip'), '(10) persistent members strip shows before round 1')
+    await p1.waitForSelector('[data-testid="crisis-member-list"]', { timeout: 8000 }).catch(() => {})
+    check(await p1.locator('[data-testid="crisis-member-list"]').isVisible(), '(10) waiting screen shows the full member list (reveal presentation reused)')
+    check(await p1.locator('[data-testid="crisis-member-email"]').count() === 3, '(10) waiting screen lists all 3 members with email mailto links')
 
     // ONLINE waiting copy — auto-start text + live arrival count; NOT the classroom "instructor" copy
     await p1.waitForSelector('[data-testid="crisis-waiting-count"]', { timeout: 8000 }).catch(() => {})
     const waitText = await p1.textContent('[data-testid="crisis-waiting-start"]')
     check(/starts automatically/i.test(waitText) && /of 3/.test(waitText), '(10) online waiting screen shows the auto-start copy + live "N of 3" arrival count')
     check(!/waiting for your instructor/i.test(waitText), '(10) online waiting screen does NOT show the classroom "instructor" copy')
-    check(await p1.locator('[data-testid="crisis-waiting-start"]').isVisible(), '(10) online waiting text is visible in the viewport')
 
-    // instructor opens the round (clock off) → student plays; strip disappears once round active
+    // per-member arrival: only w1 is here (on the page); w2/w3 are "not here yet"
+    const readStatuses = () => p1.locator('[data-testid="crisis-member-status"]').evaluateAll(els => els.map(e => e.getAttribute('data-here')))
+    await p1.waitForFunction(() => {
+      const els = Array.from(document.querySelectorAll('[data-testid="crisis-member-status"]'))
+      return els.length === 3 && els.filter(e => e.getAttribute('data-here') === 'true').length === 1
+    }, null, { timeout: 8000 }).catch(() => {})
+    const s1 = await readStatuses()
+    check(s1.filter(x => x === 'true').length === 1 && s1.filter(x => x === 'false').length === 2, '(10) waiting screen marks 1 member here (you) + 2 not-here-yet')
+
+    // LIVE update: w2 arrives (hits getRoundView) → w1's screen shows 2 here, WITHOUT reload
+    await callFn('getRoundView', { _test: { participant_id: 'w2', game_instance_id: gid }, group_id: groupId })
+    await p1.waitForFunction(() => {
+      const els = Array.from(document.querySelectorAll('[data-testid="crisis-member-status"]'))
+      return els.filter(e => e.getAttribute('data-here') === 'true').length === 2
+    }, null, { timeout: 8000 }).catch(() => {})
+    const s2 = await readStatuses()
+    check(s2.filter(x => x === 'true').length === 2, '(10) waiting screen live-updates a member to "here" when they arrive (no reload)')
+    check((await p1.textContent('[data-testid="crisis-waiting-count"]')).includes('2 of 3'), '(10) the "N of 3" count live-updates to 2 of 3')
+
+    // instructor opens the round (clock off) → student plays; the member list disappears once active
     await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: groupId })
     await p1.waitForFunction(() => !!window.__crisisState, null, { timeout: 20000 }).catch(() => {})
     const st = await stateOf(p1)
     check(st && ['buyer', 'seller1', 'seller2'].includes(st.role), '(10) round active online → a seat/role is assigned')
     check(st && st.clockEnabled === false && st.stageDeadlineMs === null, '(10) round runs with the clock OFF (online)')
     await sleep(800)
-    check(!(await testidPresent(p1, 'crisis-members-strip')), '(10) members strip hidden once round 1 is active')
+    check(!(await testidPresent(p1, 'crisis-member-list')), '(10) member list hidden once round 1 is active')
     await p1.close()
 
     // (10b) reveal PRECEDES the KC flow: a grouped student whose prep is NOT complete still
@@ -563,8 +581,9 @@ async function main() {
     await dOff.click('[data-testid="crisis-match-control"]') // now labeled "Re-group participants"
     await dOff.waitForSelector('[data-testid="crisis-summary-row-2"]', { timeout: 12000 }).catch(() => {})
     check(await testidPresent(dOff, 'crisis-summary-row-2'), '(11c) live: re-group to 2 groups shown in the strip WITHOUT reload')
-    // 4 humans → [3,1]: group 2 short → it offers "fill seats with bots"
-    await dOff.waitForSelector('[data-testid="crisis-strip-fill-2"]', { timeout: 8000 }).catch(() => {})
+    // 4 humans → [3,1]: group 2 short → it offers "fill seats with bots" (waits for the onSnapshot
+    // + getCrisisDashboard poll to both reflect the 2nd group before the action renders)
+    await dOff.waitForSelector('[data-testid="crisis-strip-fill-2"]', { timeout: 15000 }).catch(() => {})
     check(await testidPresent(dOff, 'crisis-strip-fill-2'), '(11c) short group offers "fill empty seats with bots"')
     // move a member from group 1 (3) into group 2 (1) → group 1 gains a free seat
     await dOff.selectOption('[data-testid="crisis-strip-move-member-1"]', { index: 1 })
@@ -602,6 +621,25 @@ async function main() {
       check(!hdr.includes('(you)'), `(11e) ${role}: no "(you)" suffixes remain`)
     }
     for (const pid of PIDS) await pagesById[pid].close()
+
+    // (11f) LOCK SCOPE (strip): a locked group shows 🔒 and its actions are gone; OTHER unlocked
+    // groups keep VISIBLE move controls (per-group lock, not instance-wide). Elena's live case:
+    // Group 1 finished, Groups 2–6 must stay actionable.
+    const ls = 'ui-o21-lockscope'
+    await fsWrite(ls, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) await fsWrite(ls, `participants/L${i}`, { participant_id: `L${i}`, game_instance_id: ls, role: 'player', is_bot: false, prep_status: 'complete', name: `L ${i}`, email: `L${i}@ex.edu` })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: ls } })
+    const lsGroups = (await callFn('getOnlineGroups', { _dev: { game_instance_id: ls } })).result.groups
+    const lockedG = lsGroups.find(x => x.size === 3) // stamp the full group as locked
+    await fsWrite(ls, `groups/${lockedG.group_id}`, { seats_locked_at: '2026-01-01T00:00:00Z' })
+    const dL = await ctx.newPage()
+    await dL.goto(`${FE}/dashboard?_dev_game_instance_id=${ls}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dL.waitForSelector('[data-testid="crisis-live-summary"]', { timeout: 30000 }).catch(() => {})
+    await sleep(3500)
+    check(await dL.locator('[data-testid^="crisis-strip-locked-"]').count() >= 1, '(11f) the locked group shows a 🔒 locked indicator (its actions disabled)')
+    const moveVisible = await dL.locator('[data-testid^="crisis-strip-move-member-"]').first().isVisible().catch(() => false)
+    check(moveVisible, '(11f) an UNLOCKED group still shows a VISIBLE move control while another group is locked')
+    await dL.close()
   }
 
   await browser.close()

@@ -9,7 +9,7 @@ import {
 import { CRISIS, checkAllocation } from './constants'
 import HistoryTable from './HistoryTable'
 import ClockBar from './ClockBar'
-import OnlineMembersStrip from './OnlineMembersStrip'
+import OnlineMemberList from './OnlineMemberList'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CrisisGame — the three decision screens + shared history table (Slice 3). Polls
@@ -292,36 +292,41 @@ function PreGameWaiting({ participantId, gameInstanceId, groupId }: { participan
   }, [gameInstanceId, groupId])
 
   const online = Array.isArray(g?.members)
-  const members = (g?.members as { participant_id: string }[] | undefined) ?? []
+  const members = (g?.members as import('../api').OnlineMember[] | undefined) ?? []
   const arrived = new Set((g?.arrived as string[] | undefined) ?? [])
   const botCount = ((g?.bot_participants as string[] | undefined) ?? []).length
   const total = ((g?.player_participants as string[] | undefined) ?? []).length
-  const present = members.filter(m => arrived.has(m.participant_id)).length + botCount
+  // The viewer is "here" by definition; other humans once their poll has registered in `arrived`.
+  const humansPresent = members.filter(m => m.participant_id === participantId || arrived.has(m.participant_id)).length
+  const present = humansPresent + botCount
   const haveCount = online && total > 0
 
-  return (
-    <>
-      {/* Online only + pre-round-1 only; renders null in classroom and once the round starts. */}
-      <OnlineMembersStrip participantId={participantId} gameInstanceId={gameInstanceId} groupId={groupId} />
+  if (!online) {
+    return (
       <main style={page}>
         <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
-        {online ? (
-          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
-            {haveCount && (
-              <><strong data-testid="crisis-waiting-count">{present} of {total}</strong> group members {present === 1 ? 'is' : 'are'} here. </>
-            )}
-            Waiting for your other group members to arrive. The game starts automatically when
-            everyone is here. Your role — Buyer or Seller — will be assigned when it begins. Keep
-            this tab open.
-          </p>
-        ) : (
-          <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
-            Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
-            assigned when it begins. Keep this tab open.
-          </p>
-        )}
+        <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
+          Waiting for your instructor to start the game. Your role — Buyer or Seller — will be
+          assigned when it begins. Keep this tab open.
+        </p>
       </main>
-    </>
+    )
+  }
+
+  return (
+    <main style={page}>
+      <h1 style={{ marginTop: 0 }}>You&apos;re in your group</h1>
+      <p style={{ color: colors.textSecondary }} data-testid="crisis-waiting-start">
+        {haveCount && (
+          <><strong data-testid="crisis-waiting-count">{present} of {total}</strong> group members {present === 1 ? 'is' : 'are'} here. </>
+        )}
+        Waiting for your other group members to arrive. The game starts automatically when everyone
+        is here — reach out below to coordinate. Your role — Buyer or Seller — will be assigned when
+        it begins. Keep this tab open.
+      </p>
+      {/* The reveal's full member presentation (name + email mailto), plus per-member arrival. */}
+      <OnlineMemberList members={members} participantId={participantId} arrived={arrived} />
+    </main>
   )
 }
 

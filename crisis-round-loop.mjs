@@ -1033,6 +1033,39 @@ async function main() {
     check(!sv.ok, '(O7) a short group (2 seats) does NOT auto-open')
   }
 
+  // (O8) LOCK SCOPE (§addendum) — per-group move/fill work while ANOTHER group is locked;
+  // only the locked group's own actions are refused. Instance-wide locks apply to re-group only.
+  banner('(O8) per-group lock scope — a locked group does not block move/fill on other groups')
+  {
+    const gid = 'o2-lockscope'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 7; i++) await seedOnline(gid, `L${i}`, `L ${i}`, `L${i}@ex.edu`)
+    await groupOnline(gid) // 7 → [3,3,1]
+    const og = await onlineGroups(gid)
+    const full = og.groups.filter(x => x.size === 3)
+    const g1 = full[0], g2 = full[1], g3 = og.groups.find(x => x.size === 1)
+
+    // lock g1 by playing its first round-1 submission
+    await openG(gid, g1.group_id, 1)
+    const rm = await roleMapG(gid, g1.group_id)
+    await bidG(gid, g1.group_id, rm.seller1, 15)
+    check((await groupDoc(gid, g1.group_id)).seats_locked_at != null, '(O8) group 1 is locked (played)')
+
+    // move a member from g2 (unlocked full) → g3 (unlocked short): SUCCEEDS despite g1 locked
+    const mv = await moveSeatFn(gid, g2.members[1].participant_id, g3.group_id)
+    check(mv.ok && mv.result.moved, '(O8) move between two UNLOCKED groups succeeds while another group is locked')
+
+    // bot-fill g3 (now 2 humans, unlocked): SUCCEEDS despite g1 locked
+    const tf = await topUpFn(gid, g3.group_id)
+    check(tf.ok && tf.result.added === 1, '(O8) bot-fill an UNLOCKED group succeeds while another group is locked')
+
+    // the LOCKED group's own actions are refused (per-group guard)
+    const mvLocked = await moveSeatFn(gid, g1.members[0].participant_id, g2.group_id)
+    check(!mvLocked.ok && /lock/i.test(mvLocked.error || ''), '(O8) moving OUT of the locked group is rejected')
+    const tfLocked = await topUpFn(gid, g1.group_id)
+    check(!tfLocked.ok && /lock/i.test(tfLocked.error || ''), '(O8) bot-fill on the locked group is rejected')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

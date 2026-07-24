@@ -144,10 +144,10 @@ async function main() {
   check(codeInputs === 0, 'NO attendance-code entry screen (online has no code)')
   const revealTxt = await page.textContent('[data-testid="crisis-online-reveal"]')
   check(revealTxt.includes(target.s.name), `reveal shows the student's own name (${target.s.name})`)
-  const emailLinks = await page.locator('[data-testid="crisis-reveal-email"]').count()
+  const emailLinks = await page.locator('[data-testid="crisis-member-email"]').count()
   console.log(`  reveal rendered ${emailLinks} mailto email link(s)`)
   if (emailLinks > 0) {
-    const href = await page.locator('[data-testid="crisis-reveal-email"]').first().getAttribute('href')
+    const href = await page.locator('[data-testid="crisis-member-email"]').first().getAttribute('href')
     check(/^mailto:.+@/.test(href || ''), 'member email renders as a mailto: link')
   }
 
@@ -155,8 +155,8 @@ async function main() {
   await page.click('[data-testid="crisis-reveal-continue"]')
   await page.waitForSelector('[data-testid="crisis-waiting-start"]', { timeout: 20000 }).catch(() => {})
   check(await has(page, 'crisis-waiting-start'), 'continue → pre-game waiting screen (prep already complete)')
-  await page.waitForSelector('[data-testid="crisis-members-strip"]', { timeout: 10000 }).catch(() => {})
-  check(await has(page, 'crisis-members-strip'), 'persistent members strip renders before round 1')
+  await page.waitForSelector('[data-testid="crisis-member-list"]', { timeout: 10000 }).catch(() => {})
+  check(await has(page, 'crisis-member-list'), 'persistent members strip renders before round 1')
 
   // ── Round opens with the clock OFF (online) ─────────────────────────────────────
   banner('browser — an online round runs with the clock OFF')
@@ -166,7 +166,7 @@ async function main() {
   check(st && ['buyer', 'seller1', 'seller2'].includes(st.role), `round active → seat/role assigned late (${st?.role})`)
   check(st && st.clockEnabled === false && st.stageDeadlineMs === null, 'round runs with the clock OFF (no deadline)')
   await sleep(500)
-  check(!(await has(page, 'crisis-members-strip')), 'members strip hidden once the round is active')
+  check(!(await has(page, 'crisis-member-list')), 'members strip hidden once the round is active')
 
   if (HEADED) { console.log('\n  (HEADED) leaving the window open 10s…'); await sleep(10000) }
   for (const b of browsers) await b.close().catch(() => {})

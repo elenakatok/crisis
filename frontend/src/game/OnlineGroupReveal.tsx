@@ -3,6 +3,7 @@ import { doc, onSnapshot } from 'firebase/firestore'
 import { colors, typography, layout, spacing } from '@mygames/game-ui'
 import { db } from '../firebase'
 import type { OnlineMember } from '../api'
+import OnlineMemberList from './OnlineMemberList'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // OnlineGroupReveal (Slice O1). The screen an ONLINE student lands on right after login:
@@ -37,8 +38,6 @@ export default function OnlineGroupReveal({
     return () => unsub()
   }, [gameInstanceId, groupId])
 
-  const mailtoSubject = encodeURIComponent('Crisis game — scheduling a time to play')
-
   return (
     <main
       data-testid="crisis-online-reveal"
@@ -52,45 +51,7 @@ export default function OnlineGroupReveal({
         game begins.
       </p>
 
-      <ul
-        data-testid="crisis-reveal-members"
-        style={{ listStyle: 'none', padding: 0, margin: `${spacing.gapMd} 0`, display: 'grid', gap: spacing.gapSm }}
-      >
-        {(members ?? []).map((m) => {
-          const isYou = m.participant_id === participantId
-          return (
-            <li
-              key={m.participant_id}
-              data-testid="crisis-reveal-member"
-              style={{
-                padding: `${spacing.gapSm} ${spacing.gapMd}`,
-                border: `1px solid ${colors.border}`,
-                borderRadius: 6,
-                background: isYou ? colors.confirmBg : colors.surfaceSubtle,
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: spacing.gapMd,
-                flexWrap: 'wrap',
-              }}
-            >
-              <span style={{ fontWeight: isYou ? 700 : 600, color: colors.textStrong, overflowWrap: 'anywhere' }}>
-                {m.display_name}{isYou && ' · you'}
-              </span>
-              {m.email ? (
-                <a
-                  data-testid="crisis-reveal-email"
-                  href={`mailto:${m.email}?subject=${mailtoSubject}`}
-                  style={{ fontSize: typography.sizeXs, color: colors.textMuted, overflowWrap: 'anywhere' }}
-                >
-                  {m.email}
-                </a>
-              ) : (
-                <span style={{ fontSize: typography.sizeXs, color: colors.textMuted }}>no email on file</span>
-              )}
-            </li>
-          )
-        })}
-      </ul>
+      <OnlineMemberList members={members ?? []} participantId={participantId} />
 
       {members && members.length <= 1 && (
         <p style={{ color: colors.textSecondary, marginBottom: spacing.gapMd }}>
