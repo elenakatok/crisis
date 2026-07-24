@@ -730,6 +730,29 @@ async function main() {
     check(rep.groups[0].table.buyerProfit === sumOf(hist.map(h => h.profits.buyer)), '(R1) group table buyer profit correct')
     check(rep.classSummary.averageAllocation === 50, '(R1) average allocation = plain grand mean (80/20 → 50)')
     check(rep.students.every(s => s.botGroup === false), '(R1) all-human group students NOT marked botGroup')
+    check(S1.timeouts === 0 && S2.timeouts === 0 && B.timeouts === 0, '(R1) no-timeout seats show 0 (a number, never a dash)')
+  }
+
+  // (R1c) Report 3 surfaces per-seat TIMEOUT counts (Fix 1) — the data already lives in the
+  // frozen round state (Slice 2 st.timeouts[seat]); the report just counts it.
+  banner('(R1c) Report 3 shows timeout counts per student')
+  {
+    const gid = 'rep1c'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    // round 1: let BIDDING time out → both sellers get exactly 1 bidding timeout
+    await tick(gid, tickNow())
+    let v = (await iview(gid)).result
+    if (v.stage === 'allocation') { await alloc(gid, rm.buyer, 50, 50); v = (await iview(gid)).result }
+    if (v.stage === 'fixing') {
+      for (const s of v.seats) { if (s.role === 'seller1') await fix(gid, rm.seller1, false); if (s.role === 'seller2') await fix(gid, rm.seller2, false) }
+      v = (await iview(gid)).result
+    }
+    // rounds 2-10: clean human play, no further timeouts
+    while (v.status !== 'finished') v = await playRound(gid, rm, { b1: 15, b2: 15, a1: 50, a2: 50, f1: false, f2: false })
+    const rep = (await report(gid)).result
+    const S1 = rep.students.find(s => s.role === 'Seller 1'), S2 = rep.students.find(s => s.role === 'Seller 2'), B = rep.students.find(s => s.role === 'Buyer')
+    check(S1.timeouts === 1 && S2.timeouts === 1, '(R1c) both sellers show their 1 bidding timeout in Report 3')
+    check(B.timeouts === 0, '(R1c) buyer who never timed out shows 0')
   }
 
   // (R1b) mixed fixing — a seller who fixes SOME crises → partial %, computed differentially
@@ -755,9 +778,15 @@ async function main() {
     const groups = (await rosterOf(gid)).result.groups
     for (const gg of groups) { await openG(gid, gg.group_id, 1); await driveMixedToFinish(gid, gg.group_id) }
     const rep = (await report(gid)).result
-    // Class sums + Report-2 selector: bot group OUT. Report 3: the bot-group HUMAN is IN, marked.
-    check(rep.includedGroups === 1 && rep.omittedBotGroups === 1, '(R2) class sums + selector: 1 human group in, 1 bot group omitted')
-    check(rep.groups.length === 1, '(R2) group selector lists ONLY the all-human group')
+    // Class SUMS: bot group OUT (still omitted). Report-2 selector: bot group now IN, charted,
+    // seats labeled. Report 3: the bot-group HUMAN is IN, marked; bot seats still excluded.
+    check(rep.includedGroups === 1 && rep.omittedBotGroups === 1, '(R2) class sums exclude the bot group (1 human in, 1 bot omitted)')
+    check(rep.groups.length === 2, '(R2) Report-2 selector now lists BOTH groups (Fix 2: bot-filled group charted)')
+    const botG = rep.groups.find(g => g.bots.buyer || g.bots.seller1 || g.bots.seller2)
+    const humanG = rep.groups.find(g => !g.bots.buyer && !g.bots.seller1 && !g.bots.seller2)
+    check(!!botG && !!humanG, '(R2) exactly one all-human group and one bot-filled group in the selector')
+    check(!!botG && botG.chart.length === 10, '(R2) the bot-filled group HAS a 10-period allocations chart')
+    check(!!botG && [botG.bots.buyer, botG.bots.seller1, botG.bots.seller2].filter(Boolean).length === 2, '(R2) the bot-filled group labels its two bot seats')
     check(!rep.students.some(s => s.participantId.startsWith('bot_')), '(R2) NO bot rows in the per-student table')
     // matching shuffles, so the remainder human is any of h1..h4 — find them by the marker.
     const botHuman = rep.students.find(s => s.botGroup === true)

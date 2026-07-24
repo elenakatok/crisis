@@ -194,6 +194,7 @@ export type ReportStudentRow = {
   proportionFixed: number | null
   averageAllocation: number | null
   profit: number
+  timeouts: number
   botGroup: boolean
 }
 
@@ -201,6 +202,7 @@ export type ReportGroup = {
   groupId: string
   groupNumber: number
   names: { buyer: string; seller1: string; seller2: string }
+  bots: { buyer: boolean; seller1: boolean; seller2: boolean }
   chart: ChartPoint[]
   table: { buyerProfit: number; seller1Profit: number; seller2Profit: number; seller1FixPct: number | null; seller2FixPct: number | null }
 }

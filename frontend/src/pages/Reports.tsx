@@ -31,6 +31,8 @@ function Modal({ title, onClose, wide, children }: { title: string; onClose: () 
   )
 }
 
+const botTag = <span title="Machine-played seat" style={{ marginLeft: 5, fontSize: '0.62rem', fontWeight: 700, color: '#fff', background: '#b45309', borderRadius: 3, padding: '0 4px', verticalAlign: 'middle' }}>BOT</span>
+
 const th: React.CSSProperties = { textAlign: 'left', padding: '0.4rem 0.7rem', borderBottom: '2px solid #ddd', fontSize: '0.8rem', fontWeight: 600, whiteSpace: 'nowrap', background: '#faf7f2' }
 const td: React.CSSProperties = { padding: '0.4rem 0.7rem', borderBottom: '1px solid #eee', fontSize: '0.85rem', fontVariantNumeric: 'tabular-nums' }
 
@@ -46,7 +48,7 @@ function Figure({ label, value, note }: { label: string; value: string; note?: s
 }
 
 // ── Sortable per-student table (Report 3) ───────────────────────────────────────────
-type SortKey = 'name' | 'groupNumber' | 'role' | 'averageBid' | 'proportionFixed' | 'averageAllocation' | 'profit'
+type SortKey = 'name' | 'groupNumber' | 'role' | 'averageBid' | 'proportionFixed' | 'averageAllocation' | 'timeouts' | 'profit'
 function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
   const [key, setKey] = useState<SortKey>('groupNumber')
   const [dir, setDir] = useState<1 | -1>(1)
@@ -71,7 +73,7 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
         <thead><tr>
           {head('name', 'Name')}{head('groupNumber', 'Group')}{head('role', 'Role')}
           {head('averageBid', 'Average bid')}{head('proportionFixed', 'Proportion fixed')}
-          {head('averageAllocation', 'Average allocation')}{head('profit', 'Profit')}
+          {head('averageAllocation', 'Average allocation')}{head('timeouts', 'Timeouts')}{head('profit', 'Profit')}
         </tr></thead>
         <tbody>
           {sorted.map(r => (
@@ -85,6 +87,7 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
               <td style={td}>{one(r.averageBid)}{r.role === 'Buyer' ? ' *' : ''}</td>
               <td style={td}>{pct(r.proportionFixed)}</td>
               <td style={td}>{r.averageAllocation === null ? '—' : one(r.averageAllocation)}</td>
+              <td style={{ ...td, color: r.timeouts > 0 ? '#b45309' : undefined, fontWeight: r.timeouts > 0 ? 600 : undefined }}>{r.timeouts}</td>
               <td style={td}>{money(r.profit)}</td>
             </tr>
           ))}
@@ -92,6 +95,7 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
       </table>
       <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '0.4rem 0.7rem' }}>
         * The Buyer&apos;s &ldquo;average bid&rdquo; is the allocation-weighted average price they paid.
+        {rows.some(r => r.timeouts > 0) && <> · <span style={{ color: '#b45309' }}>Timeouts</span> = stages the seat missed; those decisions were filled by default, so a &ldquo;proportion fixed&rdquo; with many timeouts is an artifact, not a strategy.</>}
         {rows.some(r => r.botGroup) && <> · <span style={{ color: '#b45309' }}>· bots</span> = played in a bot-filled group (the other seats were bots); their figures are their own.</>}
       </p>
     </div>
@@ -146,7 +150,9 @@ export default function Reports() {
   const [active, setActive] = useState<ReportKind | null>(null)
   const [groupIdx, setGroupIdx] = useState(0)
 
-  const hasData = (report?.includedGroups ?? 0) > 0
+  const hasData = (report?.includedGroups ?? 0) > 0          // all-human groups → Report 1 (class sums)
+  const hasGroups = (report?.groups.length ?? 0) > 0         // any charted group → Report 2 (incl. bot-filled)
+  const hasStudents = (report?.students.length ?? 0) > 0     // any human seat → Report 3
   const omitted = report?.omittedBotGroups ?? 0
   const omitNote = omitted > 0 ? <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}> · {omitted} bot-filled group{omitted !== 1 ? 's' : ''} omitted</span> : null
 
@@ -160,17 +166,17 @@ export default function Reports() {
     },
     {
       id: 'group', title: 'By group',
-      preview: hasData
-        ? <span data-testid="tile-group" style={{ fontSize: '0.9rem', color: '#555' }}>allocations chart + profits/fixing per group</span>
-        : <span data-testid="tile-group" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No finished human groups yet.</span>,
-      onOpen: () => setActive('group'), disabled: !hasData, actionLabel: 'Open ↗',
+      preview: hasGroups
+        ? <span data-testid="tile-group" style={{ fontSize: '0.9rem', color: '#555' }}>allocations chart + profits/fixing per group{omitted > 0 ? ' (bot-filled groups included, labelled)' : ''}</span>
+        : <span data-testid="tile-group" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No finished groups yet.</span>,
+      onOpen: () => setActive('group'), disabled: !hasGroups, actionLabel: 'Open ↗',
     },
     {
       id: 'students', title: 'Per-student',
-      preview: hasData
+      preview: hasStudents
         ? <span data-testid="tile-students" style={{ fontSize: '0.9rem', color: '#555' }}>{report!.students.length} students · sortable</span>
-        : <span data-testid="tile-students" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No finished human groups yet.</span>,
-      onOpen: () => setActive('students'), disabled: !hasData, actionLabel: 'Open ↗',
+        : <span data-testid="tile-students" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No finished human seats yet.</span>,
+      onOpen: () => setActive('students'), disabled: !hasStudents, actionLabel: 'Open ↗',
     },
   ]
 
@@ -202,7 +208,6 @@ export default function Reports() {
             <Figure label="Total buyer profit" value={money(report.classSummary.totalBuyerProfit)} />
             <Figure label="Total seller profit" value={money(report.classSummary.totalSellerProfit)} />
             <Figure label="Average bid" value={one(report.classSummary.averageBid)} note="ECU per unit" />
-            <Figure label="Average allocation" value={one(report.classSummary.averageAllocation)} note="units per seller" />
             <Figure label="Crises fixed (class)" value={pct(report.classSummary.pctCrisesFixed)} note="of crises faced" />
           </div>
           {omitted > 0 && <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: 0 }}>{omitted} bot-filled group{omitted !== 1 ? 's' : ''} omitted from all figures.</p>}
@@ -225,12 +230,17 @@ export default function Reports() {
             <table data-testid="report-group-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
               <thead><tr><th style={th}>Role</th><th style={th}>Name</th><th style={th}>Profit</th><th style={th}>Fixing %</th></tr></thead>
               <tbody>
-                <tr><td style={td}>Buyer</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.buyer}</td><td style={td}>{money(g.table.buyerProfit)}</td><td style={td}>—</td></tr>
-                <tr><td style={td}>Seller 1</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.seller1}</td><td style={td}>{money(g.table.seller1Profit)}</td><td style={td}>{pct(g.table.seller1FixPct)}</td></tr>
-                <tr><td style={td}>Seller 2</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.seller2}</td><td style={td}>{money(g.table.seller2Profit)}</td><td style={td}>{pct(g.table.seller2FixPct)}</td></tr>
+                <tr><td style={td}>Buyer</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.buyer}{g.bots.buyer && botTag}</td><td style={td}>{money(g.table.buyerProfit)}</td><td style={td}>—</td></tr>
+                <tr><td style={td}>Seller 1</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.seller1}{g.bots.seller1 && botTag}</td><td style={td}>{money(g.table.seller1Profit)}</td><td style={td}>{pct(g.table.seller1FixPct)}</td></tr>
+                <tr><td style={td}>Seller 2</td><td style={{ ...td, whiteSpace: 'nowrap' }}>{g.names.seller2}{g.bots.seller2 && botTag}</td><td style={td}>{money(g.table.seller2Profit)}</td><td style={td}>{pct(g.table.seller2FixPct)}</td></tr>
               </tbody>
             </table>
           </div>
+          {(g.bots.buyer || g.bots.seller1 || g.bots.seller2) && (
+            <p data-testid="report-group-bot-note" style={{ fontSize: '0.75rem', color: '#b45309', margin: '0.5rem 0 0' }}>
+              This is a bot-filled group — seats marked <strong>BOT</strong> were machine-played; those figures are machine-generated, not student outcomes.
+            </p>
+          )}
         </Modal>
       )}
 
