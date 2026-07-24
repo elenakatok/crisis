@@ -94,13 +94,14 @@ async function groupOnlineCore(gameInstanceId: string) {
     )
   }
 
-  // 3. The full HUMAN roster (bots are only ever seat-fillers; role must be the single
-  //    matching role `player`). Presence / attendance are NOT required — this is a
-  //    deploy-time pre-match of everyone on the roster (that is the whole point of §1).
-  const humanDocs = participantsSnap.docs.filter((d) => {
-    const x = d.data()
-    return x['is_bot'] !== true && x['role'] === 'player'
-  })
+  // 3. The full HUMAN roster (bots are only ever seat-fillers). This is a DEPLOY-TIME
+  //    pre-match of everyone on the roster (§1), so it must include participants who have
+  //    NOT logged in yet: a synced-but-un-launched roster row is role-LESS (makeSyncRoster
+  //    creates role-less rows; assignRole sets role='player' only on first launch). We
+  //    therefore group every non-bot row and assign role='player' below — the single Crisis
+  //    matching role, exactly what a later assignRole would set (and assignRole is idempotent
+  //    on an already-roled participant, so a subsequent login is a no-op on group_id/role).
+  const humanDocs = participantsSnap.docs.filter((d) => d.data()['is_bot'] !== true)
   if (humanDocs.length === 0) {
     throw new HttpsError('failed-precondition', 'No participants on the roster to group yet.')
   }
@@ -155,6 +156,11 @@ async function groupOnlineCore(gameInstanceId: string) {
       batch.update(instanceRef.collection('participants').doc(pid), {
         group_id: groupId,
         is_lead: pid === lead,
+        // Assign the single Crisis matching role now (a role-less roster row hasn't logged in
+        // yet). role_counts is not touched: Crisis is single-role so pickRole ignores it, and
+        // skipping it keeps a re-group from double-counting. assignRole stays idempotent.
+        role: 'player',
+        role_assigned_at: FieldValue.serverTimestamp(),
         display_name: displayNameOf(x, pid), // use the roster name if the student never set one
       })
     }

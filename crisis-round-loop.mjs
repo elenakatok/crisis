@@ -849,6 +849,20 @@ async function main() {
     // fillRemainderWithBots regression: still callable, no-ops (no ungrouped humans online)
     const fr = await callFn('fillRemainderWithBots', asDev(gid))
     check(fr.ok && fr.result.ok && fr.result.created === false, '(O1) fillRemainderWithBots no-ops on a fully-grouped online instance (unchanged, verified)')
+
+    // DEPLOY-TIME reality: a synced-but-un-launched roster row is role-LESS (no role field).
+    // Grouping must still pick it up and assign role='player' (else a pre-login pre-match
+    // groups nobody in production).
+    const rlGid = 'online-roleless'
+    await fsWrite(rlGid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) {
+      await fsWrite(rlGid, `participants/r${i}`, { participant_id: `r${i}`, game_instance_id: rlGid, name: `Rosterless ${i}`, email: `r${i}@ex.edu` })
+    }
+    const rg = await groupOnline(rlGid)
+    check(rg.ok && rg.result.total_humans === 4, '(O1) role-less roster rows (synced, not yet launched) are grouped')
+    const rlp = (await fsGet(rlGid, 'participants/r0')).fields
+    check(rlp.role?.stringValue === 'player', '(O1) grouping assigns role=player to a role-less roster row')
+    check(!!rlp.group_id?.stringValue, '(O1) role-less row received a group_id')
   }
 
   // (O2) re-group BEFORE lock cleanly replaces; play locks; re-group AFTER lock rejected
