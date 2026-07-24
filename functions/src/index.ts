@@ -62,6 +62,7 @@ export const submitStaticKnowledgeCheckQuestion = makeSubmitStaticKnowledgeCheck
 export const getInfoUrls                        = makeGetInfoUrls(crisisGameDef)
 export { getReportData } from './getReportData'
 export { getCrisisReport } from './getCrisisReport'
+export { getOnlineReport } from './getOnlineReport'
 export { scoreAndRecord } from './scoreAndRecord'
 
 // ── Slice 2: the round loop + clock (server-authoritative Firestore shell over the
@@ -88,7 +89,7 @@ export { runBotActionsTask, runBotActionsForTest } from './botRunner'
 // ADDITIVE — classroom matching (triggerMatching, above) is unchanged. groupParticipantsOnline
 // forms random groups of 3 from the roster when clock_mode='off'; recordLogin stamps
 // last_login_at + returns the mode; getOnlineGroups feeds the instructor grouping panel.
-export { groupParticipantsOnline, recordLogin, getOnlineGroups, moveSeat, topUpGroupWithBots } from './groupOnline'
+export { groupParticipantsOnline, recordLogin, getOnlineGroups, moveSeat, topUpGroupWithBots, flagGroup } from './groupOnline'
 
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
 

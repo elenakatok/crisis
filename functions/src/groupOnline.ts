@@ -273,6 +273,63 @@ export const recordLogin = onCall(CORS, async (request: CallableRequest) => {
   return { ok: true as const, clock_mode: clockMode }
 })
 
+// ── flagGroup (student) — "I can't reach my group" (Slice O3, spec §4.1) ──────────────
+// Online-only. Writes a PASSIVE flag on the group doc — who reported, who was named as not-yet-
+// here, and a timestamp — the structured record behind the instructor's ⚑ and the end-of-
+// assignment report. IDEMPOTENT: the first flag wins (its flagged_at is how long they have been
+// waiting); a re-press by the same or another student never overwrites it, so there is no
+// duplicate write. The flag goes STALE automatically at first submission (seats_locked_at) — this
+// callable refuses a locked group, and readers hide a flag once the group has locked.
+//
+// The mailto itself is built CLIENT-side from the live member/arrival data the waiting screen
+// already shows; the server only supplies the two facts the client cannot compute: the group's
+// stable NUMBER (sorted, matches the dashboard) and the instructor_email config value for To:
+// (null until Elena sets it in Settings — see gameDefinition instructor_email).
+export const flagGroup = onCall(CORS, async (request: CallableRequest) => {
+  const data = request.data as Record<string, unknown>
+  const { participantId, gameInstanceId } = await extractStudentOnCallIds(data, isEmu(), authHeaderOf(request))
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+
+  const [pSnap, configSnap, groupsSnap] = await Promise.all([
+    instanceRef.collection('participants').doc(participantId).get(),
+    instanceRef.collection('config').doc('main').get(),
+    instanceRef.collection('groups').get(),
+  ])
+  // Online-only (the button is only shown online; this is the server guard).
+  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
+    throw new HttpsError('failed-precondition', 'Flagging is an online-mode action.')
+  }
+  const groupId = pSnap.data()?.['group_id'] as string | undefined
+  if (!groupId) throw new HttpsError('failed-precondition', 'You are not in a group yet.')
+
+  // Stable group number = 1-based index in the sorted group-id list (matches getCrisisDashboard).
+  const groupNumber = groupsSnap.docs.map((d) => d.id).sort((a, b) => a.localeCompare(b)).indexOf(groupId) + 1
+
+  const groupRef = instanceRef.collection('groups').doc(groupId)
+  const already = await db.runTransaction(async (tx) => {
+    const gs = await tx.get(groupRef)
+    if (!gs.exists) throw new HttpsError('not-found', 'Group not found.')
+    const gd = gs.data() as Record<string, unknown>
+    if (gd['seats_locked_at'] != null) throw new HttpsError('failed-precondition', 'This group has already started playing.')
+    if (gd['flag'] != null) return true // idempotent — first flag stands, no duplicate write
+
+    const members = (gd['members'] as OnlineMember[] | undefined) ?? []
+    const arrived = new Set((gd['arrived'] as string[] | undefined) ?? [])
+    // "named" = the human members (other than the reporter) not yet here — who the report attributes
+    // the delay to. Snapshot at flag time; the live picture can move, the record should not.
+    const named = members.filter((m) => m.participant_id !== participantId && !arrived.has(m.participant_id)).map((m) => m.participant_id)
+    const reporterName = members.find((m) => m.participant_id === participantId)?.display_name ?? participantId
+    tx.set(groupRef, {
+      flag: { flagged_at: FieldValue.serverTimestamp(), reported_by: participantId, reporter_name: reporterName, named },
+    }, { merge: true })
+    return false
+  })
+
+  const instructorEmail = String(configSnap.data()?.['instructor_email'] ?? '').trim()
+  return { ok: true as const, already_flagged: already, group_number: groupNumber, instructor_email: instructorEmail || null }
+})
+
 // ── getOnlineGroups (instructor) — the grouping panel's read side ────────────────────
 export const getOnlineGroups = onCall(CORS, async (request: CallableRequest) => {
   const data = request.data as Record<string, unknown>

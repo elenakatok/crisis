@@ -67,6 +67,14 @@ export const verifyAttendanceCode = (args: CallArgs, code: string) =>
 export const recordLogin = (args: CallArgs = {} as BearerArgs) =>
   callFn<{ ok: boolean; clock_mode: string }>('recordLogin', args)
 
+// ── Online mode (Slice O3): "I can't reach my group" flag ─────────────────────────
+// Writes a PASSIVE flag on the student's group (idempotent — first flag stands, no dup write),
+// and returns the two mailto facts the client cannot compute: the group's stable number and the
+// instructor_email config value for To: (null until Elena sets it in Settings). The mailto body
+// itself is built client-side from the live member/arrival data the waiting screen already shows.
+export const flagGroup = (args: CallArgs = {} as BearerArgs) =>
+  callFn<{ ok: boolean; already_flagged: boolean; group_number: number; instructor_email: string | null }>('flagGroup', args)
+
 // ── Student content callables ─────────────────────────────────────────────────
 // The shared @mygames/game-ui components (InfoPage/KnowledgeCheck/PrepQuestions, via
 // getInfoUrls) usually invoke these directly through httpsCallable; they are exposed +
@@ -237,6 +245,40 @@ export type CrisisReport = {
 }
 
 export const getCrisisReport = () => callFn<CrisisReport>('getCrisisReport', {})
+
+// ── End-of-assignment operational report (Slice O3) — "who do I email / how do I grade" ──
+export type GroupCategory = 'finished' | 'in_progress' | 'never_started'
+export type OnlineReportGroup = {
+  groupId: string
+  groupNumber: number
+  category: GroupCategory
+  humanCount: number
+  botCount: number
+  flagged: boolean
+  flagStale: boolean
+  reporterName: string | null
+  rounds: number
+}
+export type OnlineReportStudent = {
+  participantId: string
+  name: string
+  groupNumber: number | null
+  category: GroupCategory | 'no_group'
+  arrived: boolean
+  lastLoginMs: number | null
+  flagged: boolean
+  playedWithBots: boolean
+  timeouts: number
+  rounds: number | null
+}
+export type OnlineReport = {
+  ok: boolean
+  clock_mode: string
+  counts: { finished: number; inProgress: number; neverStarted: number; flagged: number }
+  groups: OnlineReportGroup[]
+  students: OnlineReportStudent[]
+}
+export const getOnlineReport = () => callFn<OnlineReport>('getOnlineReport', {})
 
 // ── Clock-mode control (per-instance setting; instructor sets before starting) ──
 export type GameConfig = { ok: boolean; clock_mode?: string; round_seconds?: number; num_rounds?: number }

@@ -19,12 +19,14 @@ import { getCrisisDashboard, setClockMode, moveSeat, topUpGroupWithBots, type Da
 
 const STAGE = { bidding: 'bidding', allocation: 'allocation', fixing: 'fix decision' } as const
 
+type GroupFlag = { flagged_at?: Timestamp; reported_by?: string; reporter_name?: string; named?: string[] }
 type LiveGroup = {
   id: string
   player_participants: string[]
   bot_participants: string[]
   members: { participant_id: string; display_name: string }[]
   seats_locked_at: Timestamp | null
+  flag: GroupFlag | null
 }
 
 function statusLine(g: DashboardGroup): string {
@@ -91,6 +93,7 @@ export default function CrisisDashboardTop() {
           bot_participants: (x['bot_participants'] as string[]) ?? [],
           members: (x['members'] as { participant_id: string; display_name: string }[]) ?? [],
           seats_locked_at: (x['seats_locked_at'] as Timestamp) ?? null,
+          flag: (x['flag'] as GroupFlag) ?? null,
         }
       }
       setLive(m)
@@ -166,6 +169,10 @@ export default function CrisisDashboardTop() {
                 <span style={{ fontSize: typography.sizeSm, color: g.status === 'in_progress' ? colors.successText : colors.textSecondary }}>
                   {g.status === 'in_progress' && '● '}{statusLine(g)}
                 </span>
+                {/* §O3: a student "can't reach my group" flag — ⚑ with who/when. Goes STALE
+                    automatically once the group locks (started playing = resolved), so a stale
+                    flag never renders. */}
+                <FlagBadge live={live[g.groupId]} groupNumber={g.groupNumber} names={names} />
                 {/* §O2.4: per-group actions in BOTH modes (locked/started groups show 🔒). */}
                 <StripActions
                   g={g}
@@ -199,6 +206,25 @@ export default function CrisisDashboardTop() {
       </div>
     </div>,
     host,
+  )
+}
+
+// §O3 flag indicator on a group's strip line. Renders ONLY when the group carries a live (non-
+// stale) flag: a flag present AND the group not yet locked. Once seats lock (first submission),
+// the flag is resolved and the badge disappears — no instructor "clear" action, the lock clears it.
+// Who/when is shown inline + on hover; the named (unresponsive) students resolve via the names map.
+function FlagBadge({ live, groupNumber, names }: { live?: LiveGroup; groupNumber: number | null; names: Record<string, string> }) {
+  if (!live || !live.flag || live.seats_locked_at != null) return null
+  const f = live.flag
+  const when = f.flagged_at?.toDate ? f.flagged_at.toDate().toLocaleString() : ''
+  const named = (f.named ?? []).map(pid => names[pid] ?? pid)
+  const reporter = f.reporter_name ?? (f.reported_by ? (names[f.reported_by] ?? f.reported_by) : 'a student')
+  const title = [`Flagged by ${reporter}${when ? ` at ${when}` : ''}`, named.length ? `Not reachable: ${named.join(', ')}` : ''].filter(Boolean).join(' · ')
+  return (
+    <span data-testid={`crisis-flag-indicator-${groupNumber}`} title={title} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: typography.sizeXs, fontWeight: 700, color: '#b45309' }}>
+      ⚑ student flagged
+      {named.length > 0 && <span style={{ fontWeight: 400, color: colors.textSecondary }}>({named.join(', ')})</span>}
+    </span>
   )
 }
 

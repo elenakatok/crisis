@@ -1247,6 +1247,116 @@ async function main() {
     check(srcDoc.members !== undefined && membersRaw(srcDoc).length === 2, '(O13) mixed: online source keeps members[] (rebuilt to 2)')
   }
 
+  // (O14) O3 — "I can't reach my group" flag: write, idempotence, stale-on-lock, guards.
+  const flagFn = (gid, pid) => callFn('flagGroup', asStudent(gid, pid))
+  banner('(O14) O3 — flag write + idempotence + stale-on-lock + guards')
+  {
+    const gid = 'o3-flag'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: 'prof@uni.edu' })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `f${i}`, `Flagger ${i}`, `f${i}@ex.edu`)
+    await groupOnline(gid)
+    const grp = (await onlineGroups(gid)).groups[0]
+    const gidReal = grp.group_id
+    const reporter = grp.members[0].participant_id
+
+    // First flag: nobody has arrived → named = the other two members (reporter excluded).
+    const r1 = await flagFn(gid, reporter)
+    check(r1.ok && r1.result.already_flagged === false, '(O14) first flag writes (not already flagged)')
+    check(r1.result.instructor_email === 'prof@uni.edu', '(O14) flag returns instructor_email from config')
+    check(typeof r1.result.group_number === 'number' && r1.result.group_number >= 1, '(O14) flag returns a stable group number')
+    const gd1 = await groupDoc(gid, gidReal)
+    check(gd1.flag !== undefined, '(O14) flag written on the group doc')
+    const flaggedAt1 = gd1.flag.mapValue.fields.flagged_at.timestampValue
+    const named1 = (gd1.flag.mapValue.fields.named?.arrayValue?.values ?? []).map(v => v.stringValue)
+    check(named1.length === 2 && !named1.includes(reporter), '(O14) named = the 2 members not yet here (reporter excluded)')
+    check(gd1.flag.mapValue.fields.reported_by.stringValue === reporter, '(O14) flag records who reported')
+
+    // Idempotence: a re-press by the SAME or a DIFFERENT student never overwrites the first flag.
+    const r2 = await flagFn(gid, reporter)
+    check(r2.ok && r2.result.already_flagged === true, '(O14) re-press is idempotent (already_flagged)')
+    const r3 = await flagFn(gid, grp.members[1].participant_id)
+    check(r3.ok && r3.result.already_flagged === true, '(O14) a second student pressing makes no duplicate flag')
+    const gd2 = await groupDoc(gid, gidReal)
+    check(gd2.flag.mapValue.fields.flagged_at.timestampValue === flaggedAt1, '(O14) flagged_at unchanged (first flag stands)')
+    check(gd2.flag.mapValue.fields.reported_by.stringValue === reporter, '(O14) original reporter preserved')
+
+    // Stale-on-lock: once the group locks (first submission), flagging is refused — the flag is
+    // resolved. The record itself PERSISTS on the doc (the report shows it was flagged); readers
+    // hide it as stale (that is the strip/UI test).
+    await openG(gid, gidReal, 1)
+    const rm = await roleMapG(gid, gidReal)
+    await bidG(gid, gidReal, rm.seller1, 15) // first submission → seats_locked_at
+    const rLocked = await flagFn(gid, reporter)
+    check(!rLocked.ok && /started|lock/i.test(rLocked.error || ''), '(O14) flagGroup refuses once the group has locked')
+    const gd3 = await groupDoc(gid, gidReal)
+    check(gd3.flag !== undefined && gd3.seats_locked_at !== undefined, '(O14) the flag RECORD persists after lock (report keeps it; strip hides it stale)')
+
+    // Guards: classroom instance rejected; a student with no group rejected.
+    const cgid = 'o3-flag-classroom'
+    await fsWrite(cgid, 'config/main', { clock_mode: 'on' })
+    await seedOnline(cgid, 'z0', 'Zed 0', 'z0@ex.edu')
+    const rC = await flagFn(cgid, 'z0')
+    check(!rC.ok && /online/i.test(rC.error || ''), '(O14) flagGroup rejects in classroom mode (no flag UI there)')
+    const ngid = 'o3-flag-nogroup'
+    await fsWrite(ngid, 'config/main', { clock_mode: 'off' })
+    await seedOnline(ngid, 'u0', 'Ungrouped', 'u0@ex.edu')
+    const rN = await flagFn(ngid, 'u0')
+    check(!rN.ok && /group/i.test(rN.error || ''), '(O14) flagGroup rejects a student with no group yet')
+  }
+
+  // (O15) O3 — the end-of-assignment operational report on a MIXED instance.
+  banner('(O15) O3 — getOnlineReport: finished / mid / never-started / flagged / bot-filled')
+  {
+    const gid = 'o3-report'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', num_rounds: 1 })
+    for (let i = 0; i < 13; i++) await seedOnline(gid, `p${i}`, `Person ${i}`, `p${i}@ex.edu`)
+    await groupOnline(gid)
+    const gs = (await onlineGroups(gid)).groups
+    const fulls = gs.filter(g => g.size === 3)
+    const short = gs.find(g => g.size === 1)
+    check(fulls.length === 4 && !!short, '(O15) 13 humans → 4 full groups + 1 short group')
+
+    // fulls[0] → finished (num_rounds=1, driven via callables); fulls[1] → mid (opened, not done);
+    // fulls[2] → never opened; fulls[3] → flagged (2 arrive, 1 does not); short → bot-filled.
+    await openG(gid, fulls[0].group_id, 1)
+    const finV = await driveMixedToFinish(gid, fulls[0].group_id, { bid: 15, a1: 50, a2: 50, fix: true })
+    check(finV.status === 'finished', '(O15) group 0 played to finish (num_rounds=1)')
+    await openG(gid, fulls[1].group_id, 1)
+    const fg = fulls[3]
+    await rviewG(gid, fg.group_id, fg.members[0].participant_id) // arrive
+    await rviewG(gid, fg.group_id, fg.members[1].participant_id) // arrive
+    const flg = await flagFn(gid, fg.members[0].participant_id)
+    check(flg.ok, '(O15) a member of group 3 flags it')
+    await topUpFn(gid, short.group_id) // bot-fill the short group
+    await callFn('recordLogin', asStudent(gid, 'p0')) // stamp one last_login_at
+
+    const repRes = await callFn('getOnlineReport', asDev(gid))
+    check(repRes.ok, `(O15) getOnlineReport ok [${repRes.error ?? ''}]`)
+    const rep = repRes.result ?? { counts: {}, groups: [], students: [] }
+    check(rep.counts.finished === 1, '(O15) counts.finished = 1')
+    check(rep.counts.inProgress === 1, '(O15) counts.inProgress = 1')
+    check(rep.counts.neverStarted === 3, '(O15) counts.neverStarted = 3 (never-opened + flagged + bot-filled short)')
+    check(rep.counts.flagged === 1, '(O15) counts.flagged = 1 (live, not stale)')
+
+    const botGrp = rep.groups.find(g => g.groupId === short.group_id)
+    check(botGrp && botGrp.botCount > 0 && botGrp.category === 'never_started', '(O15) bot-filled short group: botCount>0, never_started')
+    const flagGrp = rep.groups.find(g => g.groupId === fg.group_id)
+    check(flagGrp && flagGrp.flagged && !flagGrp.flagStale, '(O15) flagged group: flagged, not stale')
+    const finGrp = rep.groups.find(g => g.groupId === fulls[0].group_id)
+    check(finGrp && finGrp.category === 'finished' && finGrp.rounds === 1, '(O15) finished group: category finished, rounds=1')
+
+    const finRow = rep.students.find(s => s.participantId === fulls[0].members[0].participant_id)
+    check(finRow && finRow.category === 'finished' && finRow.rounds === 1, '(O15) a finished-group student: category finished')
+    const shortRow = rep.students.find(s => s.participantId === short.members[0].participant_id)
+    check(shortRow && shortRow.playedWithBots === true, '(O15) the short-group human: playedWithBots = true')
+    const flagRow = rep.students.find(s => s.participantId === fg.members[0].participant_id)
+    check(flagRow && flagRow.flagged === true && flagRow.arrived === true, '(O15) an arrived flagged-group member: flagged + arrived true')
+    const notArrivedRow = rep.students.find(s => s.participantId === fg.members[2].participant_id)
+    check(notArrivedRow && notArrivedRow.arrived === false, '(O15) the group-3 member who never polled: arrived false')
+    check(rep.students.filter(s => s.lastLoginMs !== null).length >= 1, '(O15) at least one student has a last_login timestamp')
+    check(rep.students.length === 13, '(O15) 13 human student rows (bots excluded)')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

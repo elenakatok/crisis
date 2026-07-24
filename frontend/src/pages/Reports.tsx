@@ -4,7 +4,7 @@ import { httpsCallable } from 'firebase/functions'
 import { signInWithCustomToken, signOut } from 'firebase/auth'
 import { auth, functions } from '../firebase'
 import { GameHeader, ReportBoard, type ReportTileConfig } from '@mygames/game-ui'
-import { getCrisisReport, type CrisisReport, type ReportStudentRow } from '../api'
+import { getCrisisReport, getOnlineReport, type CrisisReport, type ReportStudentRow, type OnlineReport, type OnlineReportStudent } from '../api'
 import AllocationsChart from './AllocationsChart'
 
 // Crisis debrief reports (Slice 7) — read-only, from the frozen finished state; bots
@@ -102,7 +102,72 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
   )
 }
 
-type ReportKind = 'class' | 'group' | 'students'
+// ── Assignment-status table (Slice O3) — the "who do I email / how do I grade" view ──────
+const catLabel: Record<OnlineReportStudent['category'], string> = {
+  finished: 'Finished', in_progress: 'Mid-game', never_started: 'Not started', no_group: 'No group',
+}
+type StatusSortKey = 'name' | 'groupNumber' | 'category' | 'arrived' | 'lastLoginMs' | 'flagged' | 'playedWithBots' | 'timeouts'
+function OnlineStatusTable({ rows }: { rows: OnlineReportStudent[] }) {
+  const [key, setKey] = useState<StatusSortKey>('groupNumber')
+  const [dir, setDir] = useState<1 | -1>(1)
+  const sorted = useMemo(() => {
+    const num = (r: OnlineReportStudent): number | string => {
+      switch (key) {
+        case 'name': return r.name
+        case 'groupNumber': return r.groupNumber ?? Infinity
+        case 'category': return r.category
+        case 'arrived': return r.arrived ? 1 : 0
+        case 'lastLoginMs': return r.lastLoginMs ?? -1
+        case 'flagged': return r.flagged ? 1 : 0
+        case 'playedWithBots': return r.playedWithBots ? 1 : 0
+        case 'timeouts': return r.timeouts
+      }
+    }
+    const cmp = (a: OnlineReportStudent, b: OnlineReportStudent) => {
+      const av = num(a), bv = num(b)
+      const r = typeof av === 'string' ? String(av).localeCompare(String(bv)) : (av as number) - (bv as number)
+      return r !== 0 ? r * dir : a.name.localeCompare(b.name)
+    }
+    return [...rows].sort(cmp)
+  }, [rows, key, dir])
+  const head = (k: StatusSortKey, label: string) => (
+    <th style={{ ...th, cursor: 'pointer' }} data-testid={`ocol-${k}`} onClick={() => { if (k === key) setDir(d => (d === 1 ? -1 : 1)); else { setKey(k); setDir(1) } }}>
+      {label}{k === key ? (dir === 1 ? ' ▲' : ' ▼') : ''}
+    </th>
+  )
+  const loginText = (ms: number | null) => (ms === null ? 'never' : new Date(ms).toLocaleString())
+  return (
+    <div style={{ overflowX: 'auto', border: '1px solid #ddd', borderRadius: 6 }}>
+      <table data-testid="crisis-status-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
+        <thead><tr>
+          {head('name', 'Name')}{head('groupNumber', 'Group')}{head('category', 'Status')}
+          {head('arrived', 'Arrived')}{head('lastLoginMs', 'Last login')}{head('flagged', 'Flagged')}
+          {head('playedWithBots', 'Bots')}{head('timeouts', 'Stages missed')}
+        </tr></thead>
+        <tbody>
+          {sorted.map(r => (
+            <tr key={r.participantId} data-testid={`status-row-${r.participantId}`}
+              data-category={r.category} data-arrived={r.arrived ? '1' : '0'} data-flagged={r.flagged ? '1' : '0'} data-bots={r.playedWithBots ? '1' : '0'}>
+              <td style={{ ...td, whiteSpace: 'nowrap' }}>{r.name}</td>
+              <td style={td}>{r.groupNumber ?? '—'}</td>
+              <td style={{ ...td, whiteSpace: 'nowrap' }}>{catLabel[r.category]}{r.category === 'finished' && r.rounds != null ? ` · ${r.rounds} rounds` : ''}</td>
+              <td style={{ ...td, color: r.arrived ? '#15803d' : '#b45309' }}>{r.arrived ? '✓' : '—'}</td>
+              <td style={{ ...td, whiteSpace: 'nowrap', color: r.lastLoginMs === null ? '#b45309' : undefined }}>{loginText(r.lastLoginMs)}</td>
+              <td style={td}>{r.flagged ? <span style={{ color: '#b45309', fontWeight: 700 }}>⚑</span> : ''}</td>
+              <td style={td}>{r.playedWithBots ? <span title="Played in a bot-filled group" style={{ fontSize: '0.68rem', fontWeight: 600, color: '#b45309' }}>bots</span> : ''}</td>
+              <td style={{ ...td, color: r.timeouts > 0 ? '#b45309' : undefined, fontWeight: r.timeouts > 0 ? 600 : undefined }}>{r.timeouts}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '0.4rem 0.7rem' }}>
+        The <span style={{ color: '#b45309' }}>⚑ flag</span> is a pre-play &ldquo;can&rsquo;t reach my group&rdquo; report; <span style={{ color: '#b45309' }}>Stages missed</span> is absence during play. Grading is participation-only — this view is for reaching out, not a grade.
+      </p>
+    </div>
+  )
+}
+
+type ReportKind = 'class' | 'group' | 'students' | 'online'
 
 export default function Reports() {
   const [searchParams] = useSearchParams()
@@ -141,10 +206,12 @@ export default function Reports() {
   }, [devGid, tokenParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [report, setReport] = useState<CrisisReport | null>(null)
+  const [online, setOnline] = useState<OnlineReport | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     if (!ready) return
     getCrisisReport().then(setReport).catch(e => setError(e instanceof Error ? e.message : 'Failed to load reports.'))
+    getOnlineReport().then(setOnline).catch(() => { /* operational report is best-effort; debrief tiles stand alone */ })
   }, [ready])
 
   const [active, setActive] = useState<ReportKind | null>(null)
@@ -153,6 +220,7 @@ export default function Reports() {
   const hasData = (report?.includedGroups ?? 0) > 0          // all-human groups → Report 1 (class sums)
   const hasGroups = (report?.groups.length ?? 0) > 0         // any charted group → Report 2 (incl. bot-filled)
   const hasStudents = (report?.students.length ?? 0) > 0     // any human seat → Report 3
+  const hasOnline = (online?.groups.length ?? 0) > 0     // any group → the assignment-status view
   const omitted = report?.omittedBotGroups ?? 0
   const omitNote = omitted > 0 ? <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}> · {omitted} bot-filled group{omitted !== 1 ? 's' : ''} omitted</span> : null
 
@@ -177,6 +245,15 @@ export default function Reports() {
         ? <span data-testid="tile-students" style={{ fontSize: '0.9rem', color: '#555' }}>{report!.students.length} students · sortable</span>
         : <span data-testid="tile-students" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No finished human seats yet.</span>,
       onOpen: () => setActive('students'), disabled: !hasStudents, actionLabel: 'Open ↗',
+    },
+    {
+      id: 'online', title: 'Assignment status',
+      preview: hasOnline
+        ? <span data-testid="tile-online" style={{ fontSize: '0.9rem', color: '#555' }}>
+            {online!.counts.finished} finished · {online!.counts.inProgress} mid-game · {online!.counts.neverStarted} not started{online!.counts.flagged > 0 ? <> · <span style={{ color: '#b45309', fontWeight: 700 }}>{online!.counts.flagged} ⚑</span></> : ''}
+          </span>
+        : <span data-testid="tile-online" style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No groups yet.</span>,
+      onOpen: () => setActive('online'), disabled: !hasOnline, actionLabel: 'Open ↗',
     },
   ]
 
@@ -248,6 +325,19 @@ export default function Reports() {
       {active === 'students' && report && (
         <Modal title="Per-student" onClose={() => setActive(null)} wide>
           <StudentTable rows={report.students} />
+        </Modal>
+      )}
+
+      {/* ── Assignment status (Slice O3): who finished / mid / never started + per-student ── */}
+      {active === 'online' && online && (
+        <Modal title="Assignment status" onClose={() => setActive(null)} wide>
+          <div data-testid="report-online" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1.25rem' }}>
+            <Figure label="Finished" value={String(online.counts.finished)} note="played to the end" />
+            <Figure label="Mid-game" value={String(online.counts.inProgress)} note="started, not done" />
+            <Figure label="Not started" value={String(online.counts.neverStarted)} note="never opened round 1" />
+            <Figure label="Flagged (open)" value={String(online.counts.flagged)} note="can't-reach reports still live" />
+          </div>
+          <OnlineStatusTable rows={online.students} />
         </Modal>
       )}
     </div>

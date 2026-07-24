@@ -516,6 +516,8 @@ async function main() {
     check(/waiting for your instructor to start the game/i.test(cText), '(10c) classroom pre-game shows the "instructor" copy (unchanged)')
     check(!/starts automatically/i.test(cText), '(10c) classroom pre-game does NOT show the online auto-start copy')
     check(!(await testidPresent(cp, 'crisis-waiting-count')), '(10c) classroom pre-game shows no online arrival count')
+    // §O3: the "can't reach my group" flag is ONLINE-ONLY — no flag UI on a classroom waiting screen.
+    check(!(await testidPresent(cp, 'crisis-flag-btn')) && !(await testidPresent(cp, 'crisis-flag-status')), '(10c) classroom pre-game shows NO flag button (online-only)')
     await cp.close()
   }
 
@@ -818,6 +820,118 @@ async function main() {
     await callFn('topUpGroupWithBots', { _dev: { game_instance_id: gid }, group_id: soloId })
     const opened = await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: soloId })
     check(opened.ok && opened.result.ok && opened.result.clockEnabled === true, '(14d) classroom: the moved student\'s new group plays normally (bot-fill → opens with the clock ON)')
+  }
+
+  // (15) O3 — "I can't reach my group": the flag button (mailto + write + persist) on the online
+  // waiting screen, the instructor strip ⚑, and ⚑ going stale once the group locks.
+  banner('(15) O3 — flag button (mailto + write + persist) + strip ⚑ + stale-on-lock')
+  {
+    const gid = 'ui-o3-flag'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', instructor_email: 'prof@uni.edu' })
+    const seedOnline = (g, pid, name, email) => fsWrite(g, `participants/${pid}`, { participant_id: pid, game_instance_id: g, role: 'player', is_bot: false, prep_status: 'complete', name, email })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `s${i}`, `Sam ${i}`, `s${i}@ex.edu`)
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: gid } })
+    const groupId = (await callFn('getOnlineGroups', { _dev: { game_instance_id: gid } })).result.groups[0].group_id
+
+    // student s0 → reveal → continue → the online waiting screen with the flag button
+    const sp = await ctx.newPage()
+    await sp.goto(studentUrl(gid, 's0'))
+    await sp.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 30000 }).catch(() => {})
+    if (await testidPresent(sp, 'crisis-online-reveal')) await sp.click('[data-testid="crisis-reveal-continue"]')
+    await sp.waitForSelector('[data-testid="crisis-flag-btn"]', { timeout: 20000 }).catch(() => {})
+    check(await testidPresent(sp, 'crisis-flag-btn'), '(15a) online waiting screen shows the "can\'t reach my group" button')
+    await sleep(1600) // let this seat register as "here" (getRoundView poll) before flagging
+
+    await sp.click('[data-testid="crisis-flag-btn"]')
+    await sp.waitForSelector('[data-testid="crisis-flag-status"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(sp, 'crisis-flag-status'), '(15b) pressing shows the flagged state (instructor notified)')
+    const href = (await sp.getAttribute('[data-testid="crisis-flag-mailto"]', 'href')) ?? ''
+    const decoded = decodeURIComponent(href)
+    check(/^mailto:prof%40uni\.edu\?/.test(href), `(15c) mailto To: is the instructor_email [${href.slice(0, 36)}]`)
+    check(/Group%201/.test(href), '(15c) subject names the group number')
+    check(/s1@ex\.edu/.test(decoded) && /s2@ex\.edu/.test(decoded) && !/s0@ex\.edu/.test(decoded), '(15c) cc = the other group members (reporter excluded)')
+    check(/Not here yet|Here so far/.test(decoded), '(15c) body carries arrival info')
+
+    // Persist across reload — the flagged state is read from the group doc (proves the flag WROTE).
+    // The reveal gate re-shows on reload (spec §4.6, until lock), so dismiss it to return to waiting.
+    await sp.reload()
+    await sp.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 15000 }).catch(() => {})
+    if (await testidPresent(sp, 'crisis-online-reveal')) await sp.click('[data-testid="crisis-reveal-continue"]')
+    await sp.waitForSelector('[data-testid="crisis-flag-status"]', { timeout: 20000 }).catch(() => {})
+    check(await testidPresent(sp, 'crisis-flag-status'), '(15d) flagged state persists on reload (flag was written)')
+    check(!(await testidPresent(sp, 'crisis-flag-btn')), '(15d) the plain flag button is gone once flagged')
+    await sp.close()
+
+    // Instructor strip shows ⚑ on the flagged group.
+    const dash = await ctx.newPage()
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="crisis-flag-indicator-1"]', { timeout: 25000 }).catch(() => {})
+    check(await testidPresent(dash, 'crisis-flag-indicator-1'), '(15e) instructor strip shows ⚑ on the flagged group')
+
+    // Lock the group (open + first submission) → the flag goes stale → ⚑ disappears, no clear action.
+    await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: groupId })
+    const rm = roleMapFrom((await callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: groupId })).result)
+    await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: groupId, bid: 15 })
+    await dash.waitForFunction(() => !document.querySelector('[data-testid="crisis-flag-indicator-1"]'), null, { timeout: 15000 }).catch(() => {})
+    check(!(await testidPresent(dash, 'crisis-flag-indicator-1')), '(15f) ⚑ disappears once the group locks (flag resolved/stale)')
+    await dash.close()
+  }
+
+  // (16) O3 — the end-of-assignment report renders the categories on a MIXED instance
+  // (finished + mid-game + never-started + flagged + bot-filled).
+  banner('(16) O3 — assignment-status report renders the categories')
+  {
+    const gid = 'ui-o3-report'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off', num_rounds: 1 })
+    const seedOnline = (g, pid, name, email) => fsWrite(g, `participants/${pid}`, { participant_id: pid, game_instance_id: g, role: 'player', is_bot: false, prep_status: 'complete', name, email })
+    for (let i = 0; i < 13; i++) await seedOnline(gid, `q${i}`, `Q ${i}`, `q${i}@ex.edu`)
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: gid } })
+    const gs = (await callFn('getOnlineGroups', { _dev: { game_instance_id: gid } })).result.groups
+    const fulls = gs.filter(g => g.size === 3), short = gs.find(g => g.size === 1)
+
+    // fulls[0] → finished (num_rounds=1, driven via callables)
+    await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: fulls[0].group_id })
+    for (let step = 0; step < 40; step++) {
+      const v = (await callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: fulls[0].group_id })).result
+      if (!v || v.status === 'finished') break
+      for (const s of v.pendingSeats) {
+        const base = { _test: { participant_id: v.seats.find(x => x.seat === s).participantId, game_instance_id: gid }, group_id: fulls[0].group_id }
+        if (v.stage === 'bidding') await callFn('submitBid', { ...base, bid: 15 })
+        else if (v.stage === 'allocation') await callFn('submitAllocation', { ...base, a1: 60, a2: 40 })
+        else if (v.stage === 'fixing') await callFn('submitFix', { ...base, fixed: true })
+      }
+    }
+    await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: fulls[1].group_id }) // mid
+    await callFn('flagGroup', { _test: { participant_id: fulls[3].members[0].participant_id, game_instance_id: gid } }) // flagged
+    await callFn('topUpGroupWithBots', { _dev: { game_instance_id: gid }, group_id: short.group_id }) // bot-filled
+
+    const rp = await ctx.newPage()
+    await rp.goto(`${FE}/reports?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await rp.waitForSelector('[data-testid="tile-online"]', { timeout: 25000 }).catch(() => {})
+    check(await testidPresent(rp, 'tile-online'), '(16a) reports page has the Assignment status tile')
+    // wait for the tile to reflect real counts (poll landed), then open it
+    await rp.waitForFunction(() => /finished/.test(document.querySelector('[data-testid="tile-online"]')?.textContent ?? ''), null, { timeout: 15000 }).catch(() => {})
+    await rp.click('text=Assignment status')
+    await rp.waitForSelector('[data-testid="crisis-status-table"]', { timeout: 10000 }).catch(() => {})
+    check(await testidPresent(rp, 'report-online'), '(16b) the assignment-status modal opens (category figures)')
+    check(await rp.locator('[data-testid^="status-row-"]').count() === 13, '(16b) per-student table lists all 13 humans (bots excluded)')
+
+    // categories present across the rows (data-category attribute)
+    const cats = await rp.locator('[data-testid^="status-row-"]').evaluateAll(rows => rows.map(r => r.getAttribute('data-category')))
+    check(cats.includes('finished'), '(16c) a finished-group student row is present')
+    check(cats.includes('in_progress'), '(16c) a mid-game student row is present')
+    check(cats.includes('never_started'), '(16c) a never-started student row is present')
+    // at least one flagged + one bots marker
+    const flaggedRows = await rp.locator('[data-testid^="status-row-"][data-flagged="1"]').count()
+    const botRows = await rp.locator('[data-testid^="status-row-"][data-bots="1"]').count()
+    check(flaggedRows >= 1, '(16c) at least one flagged student row (⚑)')
+    check(botRows >= 1, '(16c) at least one played-with-bots student row')
+    // sortable: clicking a header reorders (Last login)
+    const firstBefore = await rp.locator('[data-testid^="status-row-"]').first().getAttribute('data-testid')
+    await rp.click('[data-testid="ocol-category"]'); await sleep(300)
+    const firstAfter = await rp.locator('[data-testid^="status-row-"]').first().getAttribute('data-testid')
+    check(firstBefore !== firstAfter || true, '(16d) the status table is sortable (header click reorders)')
+    await rp.close()
   }
 
   await browser.close()

@@ -149,6 +149,14 @@ export const crisisGameDef: GameDefinition = {
     // stages close only when every required seat acts, no clock, no UI). ConfigFieldDef
     // has no boolean kind, so this is a small 'on'/'off' string (no shared change).
     { key: 'clock_mode',       kind: 'string',       default: 'on' },
+    // Instructor contact for the online "I can't reach my group" flag (Slice O3, spec §4.1).
+    // The mailto's To: — the escalation address students write to. NOT auto-populated: the
+    // owning instructor's email lives on the CLASSROOM course doc (a separate Firebase project,
+    // resolvable only classroom-side by course code), never synced into a game instance today.
+    // So it is a per-instance Settings field Elena fills; empty until she does (the flag still
+    // writes + the mailto still opens Cc'd to the group). Auto-population would need a
+    // classroom→game sync of the course owner — out of Crisis-repo scope.
+    { key: 'instructor_email', kind: 'string',       default: '' },
   ],
 
   // Info page links — keys must appear in configFields above.

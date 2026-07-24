@@ -3,8 +3,8 @@ import { doc, onSnapshot } from 'firebase/firestore'
 import { colors, typography, layout, spacing } from '@mygames/game-ui'
 import { db } from '../firebase'
 import {
-  getRoundView, submitBid, submitAllocation, submitFix,
-  type SeatView, type Role,
+  getRoundView, submitBid, submitAllocation, submitFix, flagGroup,
+  type SeatView, type Role, type OnlineMember,
 } from '../api'
 import { CRISIS, checkAllocation } from './constants'
 import HistoryTable from './HistoryTable'
@@ -367,7 +367,104 @@ function PreGameWaiting({ participantId, gameInstanceId, groupId }: { participan
       </p>
       {/* The reveal's full member presentation (name + email mailto), plus per-member arrival. */}
       <OnlineMemberList members={members} participantId={participantId} arrived={arrived} />
+      {/* §O3: "I can't reach my group" — mailto to the instructor cc the group + a passive flag. */}
+      <FlagButton
+        participantId={participantId}
+        members={members}
+        arrived={arrived}
+        alreadyFlagged={g?.flag != null}
+      />
     </main>
+  )
+}
+
+// ── "I can't reach my group" (Slice O3, spec §4.1) ────────────────────────────────
+// One press does BOTH: opens a pre-filled mailto (To: instructor, Cc: the group, subject naming
+// the game + group, body listing who is/isn't here + space for the student) AND writes a passive
+// flag on the group. The flag write is idempotent server-side — pressing again only reopens the
+// mailto, never a duplicate flag. The flagged state persists across reloads because it reads the
+// group doc's `flag` field (live via the parent onSnapshot). The mailto's To: comes from the
+// instructor_email config value; when Elena has not set it the draft still opens, Cc'd to the group.
+function FlagButton({
+  participantId, members, arrived, alreadyFlagged,
+}: {
+  participantId: string
+  members: OnlineMember[]
+  arrived: Set<string>
+  alreadyFlagged: boolean
+}) {
+  const [busy, setBusy] = useState(false)
+  const [pressed, setPressed] = useState(false)
+  const [href, setHref] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const flagged = alreadyFlagged || pressed
+
+  // Build the mailto from the LIVE member/arrival data the screen already has + the two facts the
+  // server returns (group number + instructor email). Names are the student-facing display names.
+  const buildHref = (groupNumber: number, instructorEmail: string | null): string => {
+    const nameOf = (m: OnlineMember) => (m.participant_id === participantId ? `${m.display_name} (me)` : m.display_name)
+    const here = members.filter(m => m.participant_id === participantId || arrived.has(m.participant_id))
+    const notHere = members.filter(m => m.participant_id !== participantId && !arrived.has(m.participant_id))
+    const cc = members.filter(m => m.participant_id !== participantId && m.email).map(m => m.email as string).join(',')
+    const subject = `Crisis game — Group ${groupNumber}: I can't reach my group`
+    const body = [
+      `I'm in Crisis Group ${groupNumber} and I'm having trouble reaching my group to schedule our game.`,
+      '',
+      here.length ? `Here so far: ${here.map(nameOf).join(', ')}` : '',
+      notHere.length
+        ? `Not here yet: ${notHere.map(m => m.display_name).join(', ')}`
+        : 'Everyone appears to be here, but we have not been able to coordinate a time.',
+      '',
+      '(Add any details here.)',
+    ].filter(line => line !== '').join('\n')
+    const to = instructorEmail ?? ''
+    return `mailto:${encodeURIComponent(to)}?cc=${encodeURIComponent(cc)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+  }
+
+  const openMailto = (url: string) => {
+    // Native open (no page navigation for a mailto:) via a transient anchor — headless-safe.
+    const a = document.createElement('a')
+    a.href = url
+    a.rel = 'noopener'
+    a.click()
+  }
+
+  const press = async () => {
+    setBusy(true); setErr(null)
+    try {
+      const r = await flagGroup() // writes the flag if absent (idempotent), returns mailto facts
+      const url = buildHref(r.group_number, r.instructor_email)
+      setHref(url); setPressed(true)
+      openMailto(url)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not flag your group.')
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div style={{ marginTop: spacing.gapLg, paddingTop: spacing.gapMd, borderTop: `1px solid ${colors.borderFaint}` }}>
+      {!flagged ? (
+        <button data-testid="crisis-flag-btn" onClick={press} disabled={busy} style={{
+          padding: '0.45rem 0.9rem', fontWeight: 600, cursor: busy ? 'wait' : 'pointer', borderRadius: 6,
+          border: `1px solid ${colors.borderMid}`, background: colors.white, color: colors.textStrong,
+        }}>
+          {busy ? 'Notifying…' : "I can't reach my group"}
+        </button>
+      ) : (
+        <div data-testid="crisis-flag-status" style={{ fontSize: typography.sizeSm, color: colors.textSecondary }}>
+          <span style={{ color: '#b45309', fontWeight: 700 }}>⚑ Flagged</span> — your instructor has been notified. Keep this tab open; you can start the moment everyone is here.
+          <div style={{ marginTop: spacing.gapSm }}>
+            {href ? (
+              <a data-testid="crisis-flag-mailto" href={href} onClick={() => href && openMailto(href)} style={{ color: '#D38626', fontWeight: 600, textDecoration: 'none' }}>Reopen the email draft</a>
+            ) : (
+              <button data-testid="crisis-flag-reopen" onClick={press} disabled={busy} style={{ fontSize: typography.sizeXs, cursor: 'pointer' }}>Reopen the email draft</button>
+            )}
+          </div>
+        </div>
+      )}
+      {err && <p data-testid="crisis-flag-error" role="alert" style={{ color: '#b91c1c', fontSize: typography.sizeXs, marginTop: spacing.gapSm }}>{err}</p>}
+    </div>
   )
 }
 
