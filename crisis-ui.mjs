@@ -170,18 +170,22 @@ async function main() {
     const finPresent = await Promise.all(pages.map(p => testidPresent(p.page, 'crisis-finished')))
     check(finPresent.every(Boolean), '(1) every seat shows the finished screen')
     const hists = await Promise.all(pages.map(p => p.page.textContent('[data-testid="crisis-history"]')))
-    check(hists.every(h => h === hists[0]), '(5) history table byte-identical across all three seats')
+    // §O2 6b: same DATA + layout for everyone; only the per-viewer "(you)" marker differs.
+    const norm = (h) => h.replace(/ \(you\)/g, '')
+    check(hists.every(h => norm(h) === norm(hists[0])), '(5) history DATA identical across all three seats (only the "(you)" marker differs)')
     const rowCounts = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-history-row-"]').count()))
     check(rowCounts.every(c => c === 10), '(1) history has 10 rows on every seat')
 
     // Buyer's Profit column present on EVERY seat (no private info, §1.1) + no horizontal scroll
     const buyerCells = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-buyer-profit-"]').count()))
     check(buyerCells.every(c => c === 10), '(1) Buyer\'s Profit column renders on every seat (10 rows)')
+    // The table sits in an overflow-x:auto container, so the PAGE must never scroll sideways
+    // (the container scrolls internally if the "(you)" markers widen a narrow layout).
     const fits = await Promise.all(pages.map(p => p.page.evaluate(() => {
       const t = document.querySelector('[data-testid="crisis-history"]'); if (!t || !t.parentElement) return false
-      return t.parentElement.scrollWidth <= t.parentElement.clientWidth + 1
+      return document.documentElement.scrollWidth <= window.innerWidth + 1
     })))
-    check(fits.every(Boolean), '(1) history table fits without horizontal scroll on every seat')
+    check(fits.every(Boolean), '(1) history never forces a horizontal PAGE scroll (its own container scrolls if needed)')
 
     for (const p of pages) await p.page.close()
   }
@@ -483,6 +487,68 @@ async function main() {
     check(!(await testidPresent(pk, 'crisis-online-reveal')), '(10b) continue dismisses the reveal')
     check(!(await testidPresent(pk, 'crisis-waiting-start')), '(10b) continue lands in the info/KC flow, NOT the game (reveal precedes KC)')
     await pk.close()
+  }
+
+  // (11) O2 — single matching control per mode, live online panel, (you) history markers
+  banner('(11) O2 — one match control per mode + live online panel + (you) markers')
+  {
+    const visibleControls = (page) => page.evaluate(() => {
+      const vis = (el) => !!(el.offsetParent || el.getClientRects().length)
+      return Array.from(document.querySelectorAll('button'))
+        .filter(b => /match now|group participants|re-group/i.test((b.textContent || '').trim()) && vis(b))
+        .map(b => (b.textContent || '').trim())
+    })
+
+    // (11a) classroom dashboard — exactly one control (shared "Match Now"), no online panel
+    const cg = 'ui-o2-on'
+    await fsWrite(cg, 'config/main', { clock_mode: 'on' })
+    const dOn = await ctx.newPage()
+    await dOn.goto(`${FE}/dashboard?_dev_game_instance_id=${cg}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dOn.waitForSelector('[data-testid="crisis-live-summary"]', { timeout: 30000 }).catch(() => {})
+    await sleep(3500)
+    check(!(await testidPresent(dOn, 'crisis-online-panel')), '(11a) classroom: online panel NOT rendered')
+    const ctlOn = await visibleControls(dOn)
+    check(ctlOn.length === 1 && /match now/i.test(ctlOn[0]), `(11a) classroom: exactly one match control [${ctlOn.join(' | ')}]`)
+    await dOn.close()
+
+    // (11b) online dashboard — panel present; exactly one control; shared "Match Now" hidden
+    const og = 'ui-o2-off'
+    await fsWrite(og, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await fsWrite(og, `participants/w${i}`, { participant_id: `w${i}`, game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: `Wanda ${i}`, email: `w${i}@ex.edu` })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: og } })
+    const dOff = await ctx.newPage()
+    await dOff.goto(`${FE}/dashboard?_dev_game_instance_id=${og}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dOff.waitForSelector('[data-testid="crisis-online-panel"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-online-panel'), '(11b) online: online panel renders in the dashboard body')
+    await sleep(1800) // MutationObserver hides the shared Match Now
+    const ctlOff = await visibleControls(dOff)
+    check(ctlOff.length === 1 && /group|re-group/i.test(ctlOff[0]), `(11b) online: exactly one match control [${ctlOff.join(' | ')}]`)
+    check(!ctlOff.some(t => /match now/i.test(t)), '(11b) online: shared "Match Now" is hidden')
+    check(await testidPresent(dOff, 'crisis-online-group-1'), '(11b) online: group 1 card renders')
+    check(!(await testidPresent(dOff, 'crisis-online-group-2')), '(11b) online: only one group so far')
+
+    // (11c) LIVE re-group without reload — add a 4th student + re-group via callable → 2 cards
+    await fsWrite(og, 'participants/w3', { participant_id: 'w3', game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: 'Wanda 3', email: 'w3@ex.edu' })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: og } })
+    await dOff.waitForSelector('[data-testid="crisis-online-group-2"]', { timeout: 12000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-online-group-2'), '(11c) live onSnapshot: re-group to 2 groups reflected WITHOUT reload')
+    await dOff.close()
+
+    // (11d) "(you)" markers land on the viewer's OWN history columns, for each of the 3 roles
+    const yg = 'ui-o2-you'; await seedGroup(yg); await open(yg, 1)
+    const pagesById = {}; for (const pid of PIDS) pagesById[pid] = await gotoSeat(ctx, yg, pid)
+    const arr = PIDS.map(pid => ({ pid, page: pagesById[pid] }))
+    await driveToFinish(arr, { bid: () => 15, alloc: () => [50, 50], fix: () => true })
+    const wantCol = { seller1: 'Bid 1 (you)', seller2: 'Bid 2 (you)', buyer: "Buyer's Profit (you)" }
+    const notCol  = { seller1: 'Bid 2 (you)', seller2: 'Bid 1 (you)', buyer: 'Bid 1 (you)' }
+    for (const pid of PIDS) {
+      const page = pagesById[pid]
+      const role = (await stateOf(page)).role
+      const hdr = await page.textContent('[data-testid="crisis-history"]')
+      check(hdr.includes(wantCol[role]), `(11d) ${role}: own column marked "${wantCol[role]}"`)
+      check(!hdr.includes(notCol[role]), `(11d) ${role}: another role's column NOT marked "(you)"`)
+    }
+    for (const pid of PIDS) await pagesById[pid].close()
   }
 
   await browser.close()

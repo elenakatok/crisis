@@ -127,7 +127,7 @@ export default function CrisisGame({
           was <strong data-testid="crisis-total-profit">{myTotal.toLocaleString('en-US')}</strong>.</p>
         <p style={{ color: colors.textSecondary }}>Profit is the object of the debrief — it is not graded.</p>
         <h2 style={{ fontSize: '1.1rem' }}>Full history</h2>
-        <HistoryTable history={view.history} />
+        <HistoryTable history={view.history} viewerRole={view.role} />
       </main>
     )
   }
@@ -138,8 +138,8 @@ export default function CrisisGame({
       <main style={page}>
         {header}
         <h1 style={{ marginTop: 0 }}>Set your price</h1>
-        <p>You are a Seller. Choose your price per unit. The other Seller submits at the same time — you
-          will not see their price until the Buyer allocates.</p>
+        <p>You are <strong>{roleLabel}</strong>. Choose your price per unit. The other Seller submits at
+          the same time — you will not see their price until the Buyer allocates.</p>
         <ul style={factList}>
           <li>Buyer&apos;s value: <strong>{CRISIS.buyerValue}</strong> per unit</li>
           <li>Your cost: <strong>{CRISIS.sellerCost}</strong> per unit (the other Seller&apos;s cost is also {CRISIS.sellerCost} — common knowledge)</li>
@@ -149,7 +149,7 @@ export default function CrisisGame({
         <BidForm submitting={submitting} onSubmit={(bid) => act(() => submitBid(groupId, bid))} />
         {waitingBanner(waitingOnYou)}
         {submitError && <ErrorNote msg={submitError} />}
-        <HistorySection history={view.history} />
+        <HistorySection history={view.history} viewerRole={view.role} />
       </main>
     )
   }
@@ -171,7 +171,7 @@ export default function CrisisGame({
         <AllocationForm submitting={submitting} onSubmit={(a1, a2) => act(() => submitAllocation(groupId, a1, a2))} />
         {waitingBanner(waitingOnYou)}
         {submitError && <ErrorNote msg={submitError} />}
-        <HistorySection history={view.history} />
+        <HistorySection history={view.history} viewerRole={view.role} />
       </main>
     )
   }
@@ -185,16 +185,17 @@ export default function CrisisGame({
     const myAlloc = mine ? alloc.a1 : alloc.a2
     const otherBid = mine ? bids.s2 : bids.s1
     const otherAlloc = mine ? alloc.a2 : alloc.a1
+    const otherLabel = mine ? 'Seller 2' : 'Seller 1'
     return (
       <main style={page}>
         {header}
         <p data-testid="crisis-crisis-banner" style={{ fontWeight: 700, color: '#b45309' }}>⚠ A crisis occurred this round.</p>
         <h1 style={{ marginTop: 0 }}>Fix the crisis on your units?</h1>
         <ul style={factList}>
-          <li>Your bid: <strong>{myBid}</strong> · your units: <strong>{myAlloc}</strong></li>
+          <li>You (<strong>{roleLabel}</strong>) — bid <strong>{myBid}</strong> · units <strong>{myAlloc}</strong></li>
           <li>Fixing costs you <strong>{CRISIS.sellerRepair}</strong>/unit ({CRISIS.sellerRepair * myAlloc} total).</li>
           <li>If you do NOT fix, the Buyer (value {CRISIS.buyerValue}) pays <strong>{CRISIS.buyerRepair}</strong>/unit on your units.</li>
-          <li>Other Seller — bid {otherBid}, units {otherAlloc}.</li>
+          <li>{otherLabel} — bid {otherBid}, units {otherAlloc}.</li>
         </ul>
         <div style={{ display: 'flex', gap: spacing.gapBtn }}>
           <button data-testid="crisis-fix-yes" style={primaryBtn} disabled={submitting} onClick={() => act(() => submitFix(groupId, true))}>Yes — fix it</button>
@@ -202,7 +203,7 @@ export default function CrisisGame({
         </div>
         {waitingBanner(waitingOnYou)}
         {submitError && <ErrorNote msg={submitError} />}
-        <HistorySection history={view.history} />
+        <HistorySection history={view.history} viewerRole={view.role} />
       </main>
     )
   }
@@ -219,7 +220,7 @@ export default function CrisisGame({
       <p data-testid="crisis-waiting" style={{ color: colors.textSecondary }}>
         Right now {stageWord}. Waiting on <strong>{view.pendingCount}</strong> player{view.pendingCount === 1 ? '' : 's'}.
       </p>
-      <HistorySection history={view.history} />
+      <HistorySection history={view.history} viewerRole={view.role} />
     </main>
   )
 }
@@ -288,11 +289,11 @@ function ErrorNote({ msg }: { msg: string }) {
   return <p data-testid="crisis-submit-error" role="alert" style={{ color: '#b91c1c', marginTop: spacing.gapSm }}>{msg}</p>
 }
 
-function HistorySection({ history }: { history: import('../api').RoundRecord[] }) {
+function HistorySection({ history, viewerRole }: { history: import('../api').RoundRecord[]; viewerRole?: import('../api').Role }) {
   return (
     <section style={{ marginTop: spacing.gapXl }}>
       <h2 style={{ fontSize: '1.05rem' }}>History — everyone sees the same table</h2>
-      <HistoryTable history={history} />
+      <HistoryTable history={history} viewerRole={viewerRole} />
     </section>
   )
 }

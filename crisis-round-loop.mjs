@@ -915,6 +915,124 @@ async function main() {
     }
   }
 
+  // ══ SLICE O2 — instructor ops: moveSeat / topUpGroupWithBots / online auto-open ══
+  const moveSeatFn = (gid, pid, target) => callFn('moveSeat', asDev(gid, { participant_id: pid, target_group_id: target }))
+  const topUpFn    = (gid, groupId)     => callFn('topUpGroupWithBots', asDev(gid, { group_id: groupId }))
+  const rviewG     = (gid, groupId, pid) => callFn('getRoundView', asStudent(gid, pid, { group_id: groupId }))
+  const membersRaw = (fields) => (fields?.members?.arrayValue?.values ?? []).map(v => {
+    const f = v.mapValue?.fields ?? {}
+    return { pid: f.participant_id?.stringValue, name: f.display_name?.stringValue }
+  })
+
+  // (O4) moveSeat between two unlocked groups — members[] + lead recomputed on both sides
+  banner('(O4) moveSeat — move a human between unlocked groups')
+  {
+    const gid = 'o2-move'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) await seedOnline(gid, `m${i}`, `Mover ${i}`, `m${i}@ex.edu`)
+    await groupOnline(gid) // 4 → [3,1]
+    let og = await onlineGroups(gid)
+    const full = og.groups.find(x => x.size === 3)
+    const short = og.groups.find(x => x.size === 1)
+    const mover = full.members[1].participant_id // a non-lead human
+
+    const r = await moveSeatFn(gid, mover, short.group_id)
+    check(r.ok && r.result.moved, '(O4) moveSeat ok')
+
+    const fA = await groupDoc(gid, full.group_id)
+    const fB = await groupDoc(gid, short.group_id)
+    check(arrVal(fA.player_participants).length === 2 && !arrVal(fA.player_participants).includes(mover), '(O4) source group down to 2, mover removed')
+    check(arrVal(fB.player_participants).length === 2 && arrVal(fB.player_participants).includes(mover), '(O4) target group up to 2, mover added')
+    check(membersRaw(fA).length === 2 && membersRaw(fB).length === 2, '(O4) members[] rebuilt on both groups')
+    check(membersRaw(fB).some(m => m.pid === mover && /^Mover \d$/.test(m.name ?? '')), '(O4) moved member keeps its name in the target members[]')
+    check(fA.lead_participant_id?.stringValue === arrVal(fA.player_participants)[0], '(O4) source lead = new seat 0')
+    check(fB.lead_participant_id?.stringValue === arrVal(fB.player_participants)[0], '(O4) target lead = seat 0')
+    const pm = (await fsGet(gid, `participants/${mover}`)).fields
+    check(pm.group_id?.stringValue === short.group_id, '(O4) mover participant group_id updated')
+    check(pm.is_lead?.booleanValue === (arrVal(fB.player_participants)[0] === mover), '(O4) mover is_lead matches target lead')
+
+    // invariants: nobody in two groups, nobody dropped, every non-empty group has a member-lead
+    og = await onlineGroups(gid)
+    const allPids = og.groups.flatMap(x => x.members.map(m => m.participant_id))
+    check(new Set(allPids).size === allPids.length && allPids.length === 4, '(O4) invariant: no student in two groups; none dropped')
+    for (const grp of og.groups.filter(x => x.size > 0)) {
+      const gd = await groupDoc(gid, grp.group_id)
+      const lead = gd.lead_participant_id?.stringValue
+      check(!!lead && arrVal(gd.player_participants).includes(lead), `(O4) invariant: non-empty group has a lead that is a member`)
+    }
+  }
+
+  // (O5) moveSeat rejected once either group has locked
+  banner('(O5) moveSeat rejected when a group is locked')
+  {
+    const gid = 'o2-movelock'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) await seedOnline(gid, `k${i}`, `K ${i}`, `k${i}@ex.edu`)
+    await groupOnline(gid)
+    const og = await onlineGroups(gid)
+    const full = og.groups.find(x => x.size === 3)
+    const short = og.groups.find(x => x.size === 1)
+    await openG(gid, full.group_id, 1)
+    const rm = await roleMapG(gid, full.group_id)
+    await bidG(gid, full.group_id, rm.seller1, 15) // first submission → locks the full group
+
+    const r1 = await moveSeatFn(gid, full.members[0].participant_id, short.group_id)
+    check(!r1.ok && /lock/i.test(r1.error || ''), '(O5) move OUT of a locked group rejected')
+    const r2 = await moveSeatFn(gid, short.members[0].participant_id, full.group_id)
+    check(!r2.ok && /lock/i.test(r2.error || ''), '(O5) move INTO a locked group rejected')
+  }
+
+  // (O6) topUpGroupWithBots — a short group becomes 1 human + 2 bots and plays clock-off
+  banner('(O6) topUpGroupWithBots — short group plays a full round clock-off')
+  {
+    const gid = 'o2-topup'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    await seedOnline(gid, 'solo', 'Solo Human', 'solo@ex.edu')
+    await groupOnline(gid) // 1 → one short group of 1
+    const og = await onlineGroups(gid)
+    const grp = og.groups[0]
+    check(grp.size === 1, '(O6) short group of 1 human formed')
+
+    const tr = await topUpFn(gid, grp.group_id)
+    check(tr.ok && tr.result.added === 2, '(O6) top-up added 2 bots')
+    const gd = await groupDoc(gid, grp.group_id)
+    check(arrVal(gd.player_participants).length === 3 && arrVal(gd.bot_participants).length === 2, '(O6) group is now 1 human + 2 bots (3 seats)')
+    check(membersRaw(gd).length === 1, '(O6) members[] still lists only the 1 human (bots are not members)')
+
+    const v0 = await rviewG(gid, grp.group_id, 'solo') // human arrives → auto-open (full group)
+    check(v0.ok && v0.result.ok, '(O6) round auto-opened when the human arrived')
+    check(v0.result.clockEnabled === false, '(O6) auto-opened round has the clock OFF')
+    const done = await driveMixedToFinish(gid, grp.group_id, { bid: 15, a1: 50, a2: 50, fix: true }, 80)
+    check(done.status === 'finished', '(O6) 1 human + 2 bots played to completion clock-off')
+  }
+
+  // (O7) online auto-open fires on the THIRD arrival, not before
+  banner('(O7) online auto-open — fires when the third seat arrives')
+  {
+    const gid = 'o2-auto'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `a${i}`, `A ${i}`, `a${i}@ex.edu`)
+    await groupOnline(gid) // 3 → one full group
+    const grp = (await onlineGroups(gid)).groups[0]
+    const pids = grp.members.map(m => m.participant_id)
+
+    const v1 = await rviewG(gid, grp.group_id, pids[0])
+    check(!v1.ok && /not.?started|not.?found/i.test(v1.error || ''), '(O7) NOT open after 1 arrival')
+    const v2 = await rviewG(gid, grp.group_id, pids[1])
+    check(!v2.ok, '(O7) NOT open after 2 arrivals')
+    const v3 = await rviewG(gid, grp.group_id, pids[2])
+    check(v3.ok && v3.result.ok, '(O7) auto-open FIRED when the third seat arrived')
+    check(v3.result.clockEnabled === false, '(O7) auto-opened round is clock-off (online)')
+    // short group never auto-opens (needs a full 3 seats first)
+    const sg = 'o2-auto-short'
+    await fsWrite(sg, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 2; i++) await seedOnline(sg, `s${i}`, `S ${i}`, `s${i}@ex.edu`)
+    await groupOnline(sg) // 2 → one short group of 2
+    const sgrp = (await onlineGroups(sg)).groups[0]
+    const sv = await rviewG(sg, sgrp.group_id, sgrp.members[0].participant_id)
+    check(!sv.ok, '(O7) a short group (2 seats) does NOT auto-open')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

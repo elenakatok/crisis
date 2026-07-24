@@ -30,9 +30,36 @@ const GROUP_SIZE = 3 // spec §6 (fixed)
 // matcher by name.
 const humanMatcher = makeTriggerMatching(crisisGameDef)
 
-/** Independent 50/50 Seller-type draw (§5.2 — do not force the mix). */
-function drawBotType(): SellerType {
+/** Independent 50/50 Seller-type draw (§5.2 — do not force the mix). EXPORTED so the online
+ *  top-up path (groupOnline.ts) uses the SAME draw, not a second copy. */
+export function drawBotType(): SellerType {
   return Math.random() < 0.5 ? 'high' : 'low'
+}
+
+/**
+ * THE bot seat-filler creation path — a single source shared by the remainder filler
+ * (below) AND the online top-up (groupOnline.topUpGroupWithBots). A server bot is a
+ * participant row with is_bot:true and a FIXED Seller type (§5.2, drawn once at fill/format
+ * and held all 10 rounds). No login, no auth, no browser. Returns the pid + the doc so the
+ * caller batches the write and appends the pid to the group's player/bot arrays.
+ */
+export function makeBotSeat(gameInstanceId: string, groupId: string, index: number, type: SellerType, now: FirebaseFirestore.FieldValue) {
+  const pid = `bot_${groupId.slice(0, 8)}_${index}`
+  const doc = {
+    participant_id: pid,
+    game_instance_id: gameInstanceId,
+    role: 'player',
+    display_name: `Bot ${index}`,
+    is_bot: true,
+    bot_type: type,               // §5.2 — drawn ONCE, held all 10 rounds
+    group_id: groupId,
+    is_lead: false,
+    prep_status: 'complete',
+    knowledge_check_score: null,
+    attendance_confirmed_at: now,
+    confirmed_ready_at: now,
+  }
+  return { pid, doc }
 }
 
 /**
@@ -82,23 +109,10 @@ async function fillRemainderCore(gameInstanceId: string) {
     const botPids: string[] = []
     const botTypes: Record<string, SellerType> = {}
     for (let i = 0; i < botsNeeded; i++) {
-      const botPid = `bot_${groupId.slice(0, 8)}_${i + 1}`
+      const { pid: botPid, doc } = makeBotSeat(gameInstanceId, groupId, i + 1, drawBotType(), now)
       botPids.push(botPid)
-      botTypes[botPid] = drawBotType()
-      batch.set(instanceRef.collection('participants').doc(botPid), {
-        participant_id: botPid,
-        game_instance_id: gameInstanceId,
-        role: 'player',
-        display_name: `Bot ${i + 1}`,
-        is_bot: true,
-        bot_type: botTypes[botPid],   // §5.2 — drawn ONCE, held all 10 rounds
-        group_id: groupId,
-        is_lead: false,
-        prep_status: 'complete',
-        knowledge_check_score: null,
-        attendance_confirmed_at: now,
-        confirmed_ready_at: now,
-      })
+      botTypes[botPid] = doc.bot_type
+      batch.set(instanceRef.collection('participants').doc(botPid), doc)
     }
 
     // Humans first → seats 0..h-1; bots after. openRound assigns roles late over these seats.

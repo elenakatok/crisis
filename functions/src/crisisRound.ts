@@ -115,14 +115,15 @@ function storedPayload(stored: StoredDoc, newState: CrisisState, deadlineMs: num
   }
 }
 
-// ── openRound (instructor): assign seats + LATE roles, start round 1 ─────────────
-export const openRound = onCall(CORS, async (request) => {
-  const data = request.data as Record<string, unknown>
-  const iid = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
-  const groupId = String(data['group_id'] ?? '')
-  if (!groupId) throw new HttpsError('invalid-argument', 'group_id required')
-
-  const instanceRef = admin.firestore().collection('game_instances').doc(iid)
+// ── openRoundCore: assign seats + LATE roles, start round 1. Shared by the instructor
+// openRound callable AND the online auto-open (maybeAutoOpen).
+//   • Instructor openRound → wholesale set (re-open): the seed-search harness re-opens the
+//     same group with fresh seeds and relies on the overwrite.
+//   • Auto-open → opts.idempotent: a transaction that NO-OPS if the round already exists, so a
+//     delayed arrival can never reset a group that has already opened and progressed.
+export async function openRoundCore(iid: string, groupId: string, opts: { nowMs: number; seed?: number; idempotent?: boolean }) {
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(iid)
   const [groupSnap, configSnap] = await Promise.all([
     instanceRef.collection('groups').doc(groupId).get(),
     instanceRef.collection('config').doc('main').get(),
@@ -150,13 +151,11 @@ export const openRound = onCall(CORS, async (request) => {
     if (botPids.has(pid)) { botSeats.push(i); botTypeBySeat[String(i)] = botTypesByPid[pid] ?? 'low' }
   })
 
-  const devSeed = isEmu() ? (data['_dev'] as Record<string, unknown> | undefined)?.['seed'] : undefined
-  const seed = typeof devSeed === 'number' ? devSeed : hashString(groupId)
-
-  const now = nowMs(data)
-  const state = openRoundState([0, 1, 2], seed, numRounds)
-  await stateDoc(iid, groupId).set({
-    state,
+  const seed = typeof opts.seed === 'number' ? opts.seed : hashString(groupId)
+  const now = opts.nowMs
+  const ref = stateDoc(iid, groupId)
+  const payload = {
+    state: openRoundState([0, 1, 2], seed, numRounds),
     group_id: groupId,
     pid_by_seat: pidBySeat,
     seat_by_pid: seatByPid,
@@ -167,12 +166,59 @@ export const openRound = onCall(CORS, async (request) => {
     bot_seats: botSeats,
     bot_type_by_seat: botTypeBySeat,
     updated_at: FieldValue.serverTimestamp(),
-  })
-  // Schedule the first bot pass (round 1). No-op for all-human groups; the emulator (no
-  // Cloud Tasks) relies on runBotActionsForTest / the resolve-on-read backstop instead.
-  if (botSeats.length > 0) await enqueueBotTask(iid, groupId, state.round, state.stage)
-  return { ok: true as const, round: state.round, stage: state.stage, clockEnabled, botSeats: botSeats.length }
+  }
+
+  let opened = true
+  if (opts.idempotent) {
+    opened = await admin.firestore().runTransaction(async (tx) => {
+      if ((await tx.get(ref)).exists) return false   // already open (and maybe progressed) — never reset
+      tx.set(ref, payload)
+      return true
+    })
+  } else {
+    await ref.set(payload)   // instructor re-open (overwrite)
+  }
+
+  // Schedule the first bot pass (round 1) on the opening write. No-op for all-human groups;
+  // the emulator (no Cloud Tasks) uses runBotActionsForTest / the resolve-on-read backstop.
+  if (opened && botSeats.length > 0) await enqueueBotTask(iid, groupId, payload.state.round, payload.state.stage)
+  return { ok: true as const, round: payload.state.round, stage: payload.state.stage, clockEnabled, botSeats: botSeats.length }
+}
+
+// ── openRound (instructor): the manual "Start game" launcher action. ──────────────
+export const openRound = onCall(CORS, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const iid = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
+  const groupId = String(data['group_id'] ?? '')
+  if (!groupId) throw new HttpsError('invalid-argument', 'group_id required')
+  const devSeed = isEmu() ? (data['_dev'] as Record<string, unknown> | undefined)?.['seed'] : undefined
+  return openRoundCore(iid, groupId, { nowMs: nowMs(data), seed: typeof devSeed === 'number' ? devSeed as number : undefined })
 })
+
+// ── maybeAutoOpen: ONLINE round-1 auto-start (§O2). When a group member reaches the game
+// screen (getRoundView), record their arrival; once every HUMAN seat has arrived (bot seats
+// count as present), open round 1 — no instructor click. Classroom is untouched (manual Start
+// game). Only fires for a FULL group of 3 (a short group must be topped up first). ──────────
+async function maybeAutoOpen(iid: string, groupId: string, participantId: string, clockNowMs: number): Promise<void> {
+  const instanceRef = admin.firestore().collection('game_instances').doc(iid)
+  const [groupSnap, configSnap] = await Promise.all([
+    instanceRef.collection('groups').doc(groupId).get(),
+    instanceRef.collection('config').doc('main').get(),
+  ])
+  if (!groupSnap.exists) return
+  if ((configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') return   // classroom → manual start only
+  const g = groupSnap.data() as Record<string, unknown>
+  const players = (g['player_participants'] as string[] | undefined) ?? []
+  if (players.length !== 3) return                                    // short group → top up first
+  const botPids = new Set((g['bot_participants'] as string[] | undefined) ?? [])
+
+  // Record this arrival, then re-read so the LAST arriver always sees the full set.
+  await instanceRef.collection('groups').doc(groupId).set({ arrived: FieldValue.arrayUnion(participantId) }, { merge: true })
+  const fresh = (await instanceRef.collection('groups').doc(groupId).get()).data() as Record<string, unknown>
+  const arrived = new Set((fresh['arrived'] as string[] | undefined) ?? [])
+  const humansPresent = players.filter((p) => !botPids.has(p)).every((h) => arrived.has(h))
+  if (humansPresent) await openRoundCore(iid, groupId, { nowMs: clockNowMs, idempotent: true }).catch(() => { /* a concurrent open won */ })
+}
 
 // ── the auth-free action core (BOT SEAM #1 — shared by human callables AND, in Slice 5,
 // the bot runner). The caller has ALREADY established WHO is acting. buildAction may
@@ -386,7 +432,13 @@ export const getRoundView = onCall(CORS, async (request) => {
   // Resolve-on-read: rescue an overdue bot pass, THEN advance a genuinely stalled clock.
   await backstopThenTick(gameInstanceId, groupId, nowMs(data))
 
-  const snap = await stateDoc(gameInstanceId, groupId).get()
+  let snap = await stateDoc(gameInstanceId, groupId).get()
+  if (!snap.exists) {
+    // ONLINE (§O2): the caller reaching this screen IS their arrival signal — auto-open once
+    // every human seat has arrived. No-op in classroom (manual Start game) or a short group.
+    await maybeAutoOpen(gameInstanceId, groupId, participantId, nowMs(data))
+    snap = await stateDoc(gameInstanceId, groupId).get()
+  }
   if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
   const stored = snap.data() as StoredDoc
   const seat = stored.seat_by_pid[participantId]
@@ -443,11 +495,13 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
   const iid = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
   const instanceRef = admin.firestore().collection('game_instances').doc(iid)
 
-  const [groupsSnap, roundsSnap, participantsSnap] = await Promise.all([
+  const [groupsSnap, roundsSnap, participantsSnap, configSnap] = await Promise.all([
     instanceRef.collection('groups').get(),
     instanceRef.collection('crisis_round').get(),
     instanceRef.collection('participants').get(),
+    instanceRef.collection('config').doc('main').get(),
   ])
+  const clockMode = String(configSnap.data()?.['clock_mode'] ?? 'on')
 
   // Resolve-on-read backstop: the dashboard polls ~2s, a reliable place to rescue an
   // overdue bot pass. Fire-and-await; the freshly-acted state surfaces on the next poll.
@@ -508,7 +562,8 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
     }
   }).sort((a, b) => (a.groupNumber ?? Infinity) - (b.groupNumber ?? Infinity))
 
-  return { ok: true as const, groups }
+  // clock_mode lets the Live view hide "Start game" online (auto-open handles round 1).
+  return { ok: true as const, clock_mode: clockMode, groups }
 })
 
 // ── on FINISH: denormalize participation metadata + mark the group completed ──────

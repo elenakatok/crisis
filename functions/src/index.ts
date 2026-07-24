@@ -88,7 +88,7 @@ export { runBotActionsTask, runBotActionsForTest } from './botRunner'
 // ADDITIVE — classroom matching (triggerMatching, above) is unchanged. groupParticipantsOnline
 // forms random groups of 3 from the roster when clock_mode='off'; recordLogin stamps
 // last_login_at + returns the mode; getOnlineGroups feeds the instructor grouping panel.
-export { groupParticipantsOnline, recordLogin, getOnlineGroups } from './groupOnline'
+export { groupParticipantsOnline, recordLogin, getOnlineGroups, moveSeat, topUpGroupWithBots } from './groupOnline'
 
 // ── Non-game onRequest endpoints ────────────────────────────────────────────────
 

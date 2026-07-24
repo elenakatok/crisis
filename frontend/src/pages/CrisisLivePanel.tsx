@@ -30,11 +30,15 @@ function Countdown({ deadlineMs }: { deadlineMs: number | null }) {
 
 export default function CrisisLivePanel() {
   const [groups, setGroups] = useState<DashboardGroup[] | null>(null)
+  const [online, setOnline] = useState(false)
   const [starting, setStarting] = useState<string | null>(null)
   const cancelled = useRef(false)
 
   const poll = async () => {
-    try { const r = await getCrisisDashboard(); if (!cancelled.current) setGroups(r.groups) } catch { /* auth not ready yet / transient */ }
+    try {
+      const r = await getCrisisDashboard()
+      if (!cancelled.current) { setGroups(r.groups); setOnline(r.clock_mode === 'off') }
+    } catch { /* auth not ready yet / transient */ }
   }
   useEffect(() => {
     cancelled.current = false
@@ -63,11 +67,14 @@ export default function CrisisLivePanel() {
             {g.status === 'not_started' && (
               <div>
                 <div style={label}>Not started</div>
-                {g.startable && (
+                {/* Online (clock OFF): round 1 auto-opens when all seats have arrived — no
+                    Start game button. Classroom keeps the manual launcher action. */}
+                {g.startable && !online && (
                   <button data-testid={`dash-start-${g.groupNumber}`} style={{ marginTop: spacing.gapSm }} disabled={starting === g.groupId} onClick={() => start(g.groupId)}>
                     {starting === g.groupId ? 'Starting…' : 'Start game'}
                   </button>
                 )}
+                {g.startable && online && <div style={{ ...label, marginTop: spacing.gapSm }}>Starts automatically when everyone arrives.</div>}
               </div>
             )}
 

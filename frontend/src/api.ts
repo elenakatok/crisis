@@ -180,9 +180,10 @@ export type DashboardGroup = {
   waitingOn: { role: Role | null; name: string | null }[]
 }
 
-/** The §4A live window over every group. Read-only — no controls. */
+/** The §4A live window over every group. Read-only — no controls. `clock_mode` lets the
+ *  Live view hide "Start game" online (auto-open handles round 1). */
 export const getCrisisDashboard = () =>
-  callFn<{ ok: boolean; groups: DashboardGroup[] }>('getCrisisDashboard', {})
+  callFn<{ ok: boolean; clock_mode?: string; groups: DashboardGroup[] }>('getCrisisDashboard', {})
 
 /** Launcher action (instructor is "a launcher and a finalizer"): start the round loop for a group. */
 export const openRound = (groupId: string) =>
@@ -303,6 +304,14 @@ export const groupParticipantsOnline = () =>
 /** clock_mode + the online groups (with members) for the grouping panel. */
 export const getOnlineGroups = () =>
   callFn<{ ok: boolean; clock_mode: string; groups: OnlineGroup[] }>('getOnlineGroups', {})
+
+/** Move a human into another group with a free seat (online; rejected once a group locks). */
+export const moveSeat = (participantId: string, targetGroupId: string) =>
+  callFn<{ ok: boolean; moved: boolean }>('moveSeat', { participant_id: participantId, target_group_id: targetGroupId })
+
+/** Fill a group's empty seats with bot seat-fillers so a short group can play (online). */
+export const topUpGroupWithBots = (groupId: string) =>
+  callFn<{ ok: boolean; added: number }>('topUpGroupWithBots', { group_id: groupId })
 
 // Type re-export so pages can annotate outcome payloads without a second import.
 export type { OutcomeSchema }

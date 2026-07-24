@@ -4,7 +4,7 @@ import { auth, functions, rtdb } from '../firebase'
 import { submitInstructorOutcome } from '../api'
 import { crisisConfig } from '../gameConfig'
 import CrisisLiveSummary from './CrisisLiveSummary'
-import OnlineGroupingPanel from '../game/OnlineGroupingPanel'
+import OnlineInstructorPanel from '../game/OnlineInstructorPanel'
 
 // ── Role labels from game config (SINGLE matching role — `player`) ─────────────
 
@@ -73,8 +73,6 @@ export default function InstructorDashboard() {
       {/* UNIFORM with SAA: a summary panel portals to the TOP of the shared <main> (under
           the buttons, above the heading) with an orange "Live view →" link, same window. */}
       <CrisisLiveSummary />
-      {/* Online mode only (clock_mode='off'); renders null in classroom mode. */}
-      <OnlineGroupingPanel />
       <SharedDashboard
         title="Instructor Dashboard — Crisis"
         roleLabels={roleLabels}
@@ -87,6 +85,9 @@ export default function InstructorDashboard() {
         reportsRoute="/reports"
         scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
       />
+      {/* Online mode only (clock_mode='off') — the primary online view, in the dashboard body
+          BELOW the site header. Renders null in classroom mode; dashboard then unchanged. */}
+      <OnlineInstructorPanel />
     </>
   )
 }
