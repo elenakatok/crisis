@@ -728,6 +728,8 @@ async function main() {
     check(rep.classSummary.totalBuyerProfit === sumOf(hist.map(h => h.profits.buyer)), '(R1) class total BUYER profit = SUM over rounds')
     check(rep.classSummary.totalSellerProfit === sumOf(hist.map(h => h.profits.seller1 + h.profits.seller2)), '(R1) class total SELLER profit = SUM (both sellers)')
     check(rep.groups[0].table.buyerProfit === sumOf(hist.map(h => h.profits.buyer)), '(R1) group table buyer profit correct')
+    check(rep.classSummary.averageAllocation === 50, '(R1) average allocation = plain grand mean (80/20 → 50)')
+    check(rep.students.every(s => s.botGroup === false), '(R1) all-human group students NOT marked botGroup')
   }
 
   // (R1b) mixed fixing — a seller who fixes SOME crises → partial %, computed differentially
@@ -753,11 +755,15 @@ async function main() {
     const groups = (await rosterOf(gid)).result.groups
     for (const gg of groups) { await openG(gid, gg.group_id, 1); await driveMixedToFinish(gid, gg.group_id) }
     const rep = (await report(gid)).result
-    check(rep.includedGroups === 1 && rep.omittedBotGroups === 1, '(R2) 1 human group included, 1 bot group omitted')
-    check(rep.groups.length === 1, '(R2) only the all-human group in the report')
-    check(rep.students.length === 3, '(R2) exactly the 3 humans of the all-human group')
-    check(!rep.students.some(s => s.participantId.startsWith('bot_')), '(R2) no bot rows anywhere')
-    check(!rep.students.some(s => s.participantId === 'h4'), '(R2) the human IN the bot group is excluded (whole group omitted)')
+    // Class sums + Report-2 selector: bot group OUT. Report 3: the bot-group HUMAN is IN, marked.
+    check(rep.includedGroups === 1 && rep.omittedBotGroups === 1, '(R2) class sums + selector: 1 human group in, 1 bot group omitted')
+    check(rep.groups.length === 1, '(R2) group selector lists ONLY the all-human group')
+    check(!rep.students.some(s => s.participantId.startsWith('bot_')), '(R2) NO bot rows in the per-student table')
+    // matching shuffles, so the remainder human is any of h1..h4 — find them by the marker.
+    const botHuman = rep.students.find(s => s.botGroup === true)
+    check(!!botHuman && typeof botHuman.profit === 'number' && ['h1', 'h2', 'h3', 'h4'].includes(botHuman.participantId), '(R2) the HUMAN from the bot group IS in Report 3, marked botGroup, with real figures')
+    check(rep.students.length === 4, '(R2) per-student = 3 (all-human group, unmarked) + 1 (bot-group human, marked)')
+    check(rep.students.filter(s => s.botGroup).length === 1 && rep.students.filter(s => !s.botGroup).length === 3, '(R2) exactly one marked, three unmarked')
   }
 
   console.log('\n' + '═'.repeat(72))

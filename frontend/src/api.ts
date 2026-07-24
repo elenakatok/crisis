@@ -194,6 +194,7 @@ export type ReportStudentRow = {
   proportionFixed: number | null
   averageAllocation: number | null
   profit: number
+  botGroup: boolean
 }
 
 export type ReportGroup = {
@@ -210,7 +211,7 @@ export type CrisisReport = {
     totalBuyerProfit: number
     totalSellerProfit: number
     averageBid: number
-    averageWinningAllocation: number
+    averageAllocation: number
     pctCrisesFixed: number | null
   }
   classChart: ChartPoint[]

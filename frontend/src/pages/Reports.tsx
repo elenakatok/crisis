@@ -75,8 +75,11 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
         </tr></thead>
         <tbody>
           {sorted.map(r => (
-            <tr key={r.participantId} data-testid={`student-row-${r.participantId}`}>
-              <td style={{ ...td, whiteSpace: 'nowrap' }}>{r.name}</td>
+            <tr key={r.participantId} data-testid={`student-row-${r.participantId}`} data-bot-group={r.botGroup ? '1' : '0'}>
+              <td style={{ ...td, whiteSpace: 'nowrap' }}>
+                {r.name}
+                {r.botGroup && <span title="Played in a bot-filled group — the other seats were bots" style={{ marginLeft: 5, fontSize: '0.68rem', fontWeight: 600, color: '#b45309' }}>· bots</span>}
+              </td>
               <td style={td}>{r.groupNumber}</td>
               <td style={{ ...td, whiteSpace: 'nowrap' }}>{r.role}</td>
               <td style={td}>{one(r.averageBid)}{r.role === 'Buyer' ? ' *' : ''}</td>
@@ -89,6 +92,7 @@ function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
       </table>
       <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '0.4rem 0.7rem' }}>
         * The Buyer&apos;s &ldquo;average bid&rdquo; is the allocation-weighted average price they paid.
+        {rows.some(r => r.botGroup) && <> · <span style={{ color: '#b45309' }}>· bots</span> = played in a bot-filled group (the other seats were bots); their figures are their own.</>}
       </p>
     </div>
   )
@@ -198,7 +202,7 @@ export default function Reports() {
             <Figure label="Total buyer profit" value={money(report.classSummary.totalBuyerProfit)} />
             <Figure label="Total seller profit" value={money(report.classSummary.totalSellerProfit)} />
             <Figure label="Average bid" value={one(report.classSummary.averageBid)} note="ECU per unit" />
-            <Figure label="Avg. winning allocation" value={one(report.classSummary.averageWinningAllocation)} note="units to the favoured seller" />
+            <Figure label="Average allocation" value={one(report.classSummary.averageAllocation)} note="units per seller" />
             <Figure label="Crises fixed (class)" value={pct(report.classSummary.pctCrisesFixed)} note="of crises faced" />
           </div>
           {omitted > 0 && <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: 0 }}>{omitted} bot-filled group{omitted !== 1 ? 's' : ''} omitted from all figures.</p>}
@@ -216,7 +220,7 @@ export default function Reports() {
             </select>
           </div>
           <AllocationsChart data={g.chart} testid="report-group-chart" />
-          <h4 style={{ margin: '1.25rem 0 0.5rem' }}>Average Profits and Fixing</h4>
+          <h4 style={{ margin: '1.25rem 0 0.5rem' }}>Profits and Fixing</h4>
           <div style={{ overflowX: 'auto', border: '1px solid #ddd', borderRadius: 6 }}>
             <table data-testid="report-group-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
               <thead><tr><th style={th}>Role</th><th style={th}>Name</th><th style={th}>Profit</th><th style={th}>Fixing %</th></tr></thead>

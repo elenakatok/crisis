@@ -38,6 +38,8 @@ export type StudentRow = {
   /** Seller: average units received. Buyer: null (blank). */
   averageAllocation: number | null
   profit: number
+  /** True if this student played in a bot-filled group (their own facts are still real). */
+  botGroup: boolean
 }
 
 export type GroupReport = {
@@ -80,7 +82,9 @@ export const getCrisisReport = onCall({ cors: crisisGameDef.corsOrigins }, async
       meta.set(p.id, { name, isBot: d['is_bot'] === true })
     }
 
-    // Included = started, has history, and NO bot seat. Stable group numbers by sorted id.
+    // Every group with history gets a stable number (sorted). Report 2's selector + the
+    // class SUMS include ONLY all-human groups; but a bot-group HUMAN still appears in
+    // Report 3 (their own facts are real) with a marker + their group number.
     const sorted = roundsSnap.docs.slice().sort((a, b) => a.id.localeCompare(b.id))
     let omittedBotGroups = 0
     const groups: GroupReport[] = []
@@ -93,54 +97,61 @@ export const getCrisisReport = onCall({ cors: crisisGameDef.corsOrigins }, async
       const history = st.history ?? []
       if (history.length === 0) continue
 
-      const seatPids = [0, 1, 2].map((s) => stored.pid_by_seat[String(s)])
-      const hasBot = (stored.bot_seats?.length ?? 0) > 0 || seatPids.some((pid) => meta.get(pid)?.isBot === true)
-      if (hasBot) { omittedBotGroups++; continue }
-
+      const botSeatSet = new Set(stored.bot_seats ?? [])
+      const isBotSeat = (seat: number) => botSeatSet.has(seat) || meta.get(stored.pid_by_seat[String(seat)])?.isBot === true
+      const hasBot = [0, 1, 2].some(isBotSeat)
       groupNumber++
+      const gn = groupNumber
+
       const nameOf = (seat: number) => meta.get(stored.pid_by_seat[String(seat)])?.name ?? '—'
       const buyerName = nameOf(st.buyerSeat), s1Name = nameOf(st.seller1Seat), s2Name = nameOf(st.seller2Seat)
-
-      const chart: ChartPoint[] = history.map((h) => ({
-        period: h.round, s1Units: h.allocation.a1, s2Units: h.allocation.a2, s1Price: h.bids.s1, s2Price: h.bids.s2,
-      }))
 
       const buyerProfit = sum(history.map((h) => h.profits.buyer))
       const s1Profit = sum(history.map((h) => h.profits.seller1))
       const s2Profit = sum(history.map((h) => h.profits.seller2))
       const s1Fix = fixPct(history, 's1'), s2Fix = fixPct(history, 's2')
 
-      groups.push({
-        groupId: doc.id, groupNumber,
-        names: { buyer: buyerName, seller1: s1Name, seller2: s2Name },
-        chart,
-        table: { buyerProfit, seller1Profit: s1Profit, seller2Profit: s2Profit, seller1FixPct: s1Fix, seller2FixPct: s2Fix },
-      })
+      // Report 2 selector + class aggregates: ALL-HUMAN groups only (the chart needs all
+      // three human seats; a bot seat would break the 100-unit stack + contaminate sums).
+      if (!hasBot) {
+        const chart: ChartPoint[] = history.map((h) => ({
+          period: h.round, s1Units: h.allocation.a1, s2Units: h.allocation.a2, s1Price: h.bids.s1, s2Price: h.bids.s2,
+        }))
+        groups.push({
+          groupId: doc.id, groupNumber: gn,
+          names: { buyer: buyerName, seller1: s1Name, seller2: s2Name },
+          chart,
+          table: { buyerProfit, seller1Profit: s1Profit, seller2Profit: s2Profit, seller1FixPct: s1Fix, seller2FixPct: s2Fix },
+        })
+      } else {
+        omittedBotGroups++
+      }
 
-      // ── per-student rows (3 humans) ──
+      // ── Report 3: per-student rows for every HUMAN seat, even in a bot-filled group —
+      // a remainder group with a bot seat is the NORMAL case; that student did the
+      // assignment and their OWN facts are real. Bot seats are skipped; humans marked.
       // Buyer: allocation-weighted average price PAID = Σ(a1·b1 + a2·b2) / Σ(a1+a2).
       const paid = sum(history.map((h) => h.allocation.a1 * h.bids.s1 + h.allocation.a2 * h.bids.s2))
       const units = sum(history.map((h) => h.allocation.a1 + h.allocation.a2))
-      // Buyer proportion sellers fixed = fixes / faced across BOTH sellers (crises faced).
       let bFaced = 0, bFixed = 0
       for (const h of history) {
         if (!h.crisisOccurred) continue
         if (h.allocation.a1 > 0) { bFaced++; if (h.fixed.s1) bFixed++ }
         if (h.allocation.a2 > 0) { bFaced++; if (h.fixed.s2) bFixed++ }
       }
-      students.push({
-        participantId: stored.pid_by_seat[String(st.buyerSeat)], name: buyerName, groupNumber, role: 'Buyer',
+      if (!isBotSeat(st.buyerSeat)) students.push({
+        participantId: stored.pid_by_seat[String(st.buyerSeat)], name: buyerName, groupNumber: gn, role: 'Buyer', botGroup: hasBot,
         averageBid: units > 0 ? paid / units : 0,
         proportionFixed: bFaced === 0 ? null : bFixed / bFaced,
         averageAllocation: null, profit: buyerProfit,
       })
-      students.push({
-        participantId: stored.pid_by_seat[String(st.seller1Seat)], name: s1Name, groupNumber, role: 'Seller 1',
+      if (!isBotSeat(st.seller1Seat)) students.push({
+        participantId: stored.pid_by_seat[String(st.seller1Seat)], name: s1Name, groupNumber: gn, role: 'Seller 1', botGroup: hasBot,
         averageBid: mean(history.map((h) => h.bids.s1)), proportionFixed: s1Fix,
         averageAllocation: mean(history.map((h) => h.allocation.a1)), profit: s1Profit,
       })
-      students.push({
-        participantId: stored.pid_by_seat[String(st.seller2Seat)], name: s2Name, groupNumber, role: 'Seller 2',
+      if (!isBotSeat(st.seller2Seat)) students.push({
+        participantId: stored.pid_by_seat[String(st.seller2Seat)], name: s2Name, groupNumber: gn, role: 'Seller 2', botGroup: hasBot,
         averageBid: mean(history.map((h) => h.bids.s2)), proportionFixed: s2Fix,
         averageAllocation: mean(history.map((h) => h.allocation.a2)), profit: s2Profit,
       })
@@ -152,7 +163,7 @@ export const getCrisisReport = onCall({ cors: crisisGameDef.corsOrigins }, async
     const totalSellerProfit = sum(included.map((g) => g.table.seller1Profit + g.table.seller2Profit))
     // grand means / class fixing over every included group's chart points
     const allBids: number[] = []
-    const majorityShares: number[] = []
+    const allAllocs: number[] = []
     let classFaced = 0, classFixed = 0
     // Re-walk the included groups' histories via their chart (units) + fix via table is not enough;
     // recompute from chart points for bids/allocation, and re-derive fixing from the per-group pcts is
@@ -166,7 +177,7 @@ export const getCrisisReport = onCall({ cors: crisisGameDef.corsOrigins }, async
       if (hasBot) continue
       for (const h of history) {
         allBids.push(h.bids.s1, h.bids.s2)
-        majorityShares.push(Math.max(h.allocation.a1, h.allocation.a2))
+        allAllocs.push(h.allocation.a1, h.allocation.a2)
         if (h.crisisOccurred) {
           if (h.allocation.a1 > 0) { classFaced++; if (h.fixed.s1) classFixed++ }
           if (h.allocation.a2 > 0) { classFaced++; if (h.fixed.s2) classFixed++ }
@@ -189,7 +200,7 @@ export const getCrisisReport = onCall({ cors: crisisGameDef.corsOrigins }, async
       totalBuyerProfit,
       totalSellerProfit,
       averageBid: mean(allBids),
-      averageWinningAllocation: mean(majorityShares), // ⚠ interpretation — see report
+      averageAllocation: mean(allAllocs), // plain grand mean (the deck's sanity check, ~50)
       pctCrisesFixed: classFaced === 0 ? null : classFixed / classFaced,
     }
 
