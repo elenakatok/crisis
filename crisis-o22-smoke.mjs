@@ -135,6 +135,54 @@ async function onlineLeg() {
   } else {
     console.log(`  (this seat owes "${st?.owes}", not a bid — bid form not shown)`)
   }
+  await page.close().catch(() => {})
+  return { token, students }
+}
+
+// ── O2.3 leg — No Group pool + "→ New group" flow ────────────────────────────────────
+async function o23Leg(token, students) {
+  banner('O2.3 leg — No Group pool + "→ New group" (fresh re-group, no open round)')
+  await fn('groupParticipantsOnline', { token }) // clean re-group (the online-leg group is open; delete + reform)
+  let og = await fn('getOnlineGroups', { token })
+  // Pick the victim from the students WE drove this run (so we have their launch URL). It is
+  // grouped by the re-group above.
+  const victim = students[0].pid
+  const vname = og.groups.flatMap(g => g.members).find(m => m.participant_id === victim)?.display_name ?? victim
+  console.log(`  ungrouping ${vname} (${victim})`)
+
+  // ungroup → the No Group pool (getCrisisDashboard.noGroup)
+  const un = await fn('moveSeat', { token, participant_id: victim, target_group_id: '' })
+  check(un.ok && un.removed, 'moveSeat(empty target) ungrouped a student in prod')
+  const dash = await fn('getCrisisDashboard', { token })
+  check((dash.noGroup ?? []).some(p => p.participant_id === victim), 'ungrouped student appears in getCrisisDashboard.noGroup (the pool)')
+
+  // instructor dashboard browser: the "No Group" row shows the student, with a place-in control
+  const dashUrl = (await launcher('/api/dashboard-url', { game_instance_id: ONLINE_INSTANCE })).url
+  const dpage = await openWindow(dashUrl)
+  dpage.on('dialog', d => d.accept()) // auto-accept the "Create a new group…?" confirm
+  await dpage.waitForSelector('[data-testid="crisis-nogroup-row"]', { timeout: 45000 }).catch(() => {})
+  check(await has(dpage, 'crisis-nogroup-row'), 'instructor dashboard shows the "No Group" row')
+  check(await has(dpage, `crisis-nogroup-move-${victim}`), 'No Group row lists the ungrouped student with a place-in picker')
+
+  // "→ New group" via the strip dropdown → a fresh solo group; pool empties (on the next poll).
+  // Wait for the browser's async moveSeat("new") + the poll to land (the row disappearing is the
+  // signal) BEFORE reading back the group state.
+  await dpage.selectOption(`[data-testid="crisis-nogroup-move-${victim}"]`, '__new__')
+  await dpage.waitForFunction(() => !document.querySelector('[data-testid="crisis-nogroup-row"]'), null, { timeout: 15000 }).catch(() => {})
+  check(!(await has(dpage, 'crisis-nogroup-row')), 'No Group row hidden after placing the student in a new group')
+  og = await fn('getOnlineGroups', { token })
+  const solo = og.groups.find(g => g.size === 1 && g.members.some(m => m.participant_id === victim))
+  check(!!solo, 'the student is now in a fresh solo group (via "→ New group")')
+  await dpage.close().catch(() => {})
+
+  // the solo student's browser: waiting screen reads "1 of 3" — never a started game
+  const stu = students.find(s => s.pid === victim)
+  const sp = await openWindow(stu.url)
+  await sp.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 45000 }).catch(() => {})
+  if (await has(sp, 'crisis-online-reveal')) await sp.click('[data-testid="crisis-reveal-continue"]')
+  await sp.waitForSelector('[data-testid="crisis-waiting-count"]', { timeout: 20000 }).catch(() => {})
+  check(/1 of 3/.test(await sp.textContent('[data-testid="crisis-waiting-start"]') || ''), 'solo student in a fresh group sees "1 of 3" (never a started game)')
+  await sp.close().catch(() => {})
 }
 
 // ── CLASSROOM leg (on the same fresh instance, BEFORE the online re-group) ──────────
@@ -171,7 +219,8 @@ async function main() {
   // Classroom FIRST (verifies clock-ON matching), then re-purpose the same fresh instance for the
   // online leg (clock OFF → groupParticipantsOnline re-forms the groups; nothing locked yet).
   await classroomLeg()
-  await onlineLeg()
+  const { token, students } = await onlineLeg()
+  await o23Leg(token, students)
   if (HEADED) { console.log('\n  (HEADED) leaving windows 10s…'); await sleep(10000) }
   for (const b of browsers) await b.close().catch(() => {})
   console.log('\n' + '═'.repeat(72))
