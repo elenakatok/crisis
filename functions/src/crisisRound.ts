@@ -524,6 +524,13 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
     meta.set(p.id, { name, isBot: d['is_bot'] === true })
   }
 
+  // The "No Group" pool (§O2.3): non-bot participants with no group_id — ungrouped (removed) or
+  // late (synced, never grouped) students the instructor can re-group. Served here because the
+  // instructor client cannot read participant docs directly (firestore rules); name only.
+  const noGroup = participantsSnap.docs
+    .filter((p) => { const d = p.data() as Record<string, unknown>; return d['is_bot'] !== true && d['group_id'] == null })
+    .map((p) => ({ participant_id: p.id, name: meta.get(p.id)?.name ?? p.id }))
+
   const roundByGroup = new Map<string, StoredDoc>()
   for (const r of roundsSnap.docs) roundByGroup.set(r.id, r.data() as StoredDoc)
 
@@ -571,7 +578,7 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
   }).sort((a, b) => (a.groupNumber ?? Infinity) - (b.groupNumber ?? Infinity))
 
   // clock_mode lets the Live view hide "Start game" online (auto-open handles round 1).
-  return { ok: true as const, clock_mode: clockMode, groups }
+  return { ok: true as const, clock_mode: clockMode, groups, noGroup }
 })
 
 // ── on FINISH: denormalize participation metadata + mark the group completed ──────

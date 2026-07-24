@@ -41,6 +41,7 @@ export default function CrisisDashboardTop() {
   const [clockMode, setClock] = useState<'on' | 'off' | null>(null)
   const [groups, setGroups] = useState<DashboardGroup[]>([])
   const [live, setLive] = useState<Record<string, LiveGroup>>({})
+  const [noGroup, setNoGroup] = useState<{ participant_id: string; name: string }[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -62,6 +63,7 @@ export default function CrisisDashboardTop() {
       if (!alive || !r.ok) return
       setClock(r.clock_mode === 'off' ? 'off' : 'on')
       setGroups(r.groups)
+      setNoGroup(r.noGroup ?? [])
     }).catch(() => {})
     tick()
     const id = setInterval(tick, 2500)
@@ -174,9 +176,52 @@ export default function CrisisDashboardTop() {
             ))}
           </div>
         )}
+
+        {/* No Group pool (§O2.3) — ungrouped (removed / late) students, name only. Hidden when
+            empty. Each can be placed into a group with a free seat or into a NEW group. */}
+        {online && noGroup.length > 0 && (
+          <div data-testid="crisis-nogroup-row" style={{ marginTop: spacing.gapMd, paddingTop: spacing.gapSm, borderTop: `1px solid ${colors.borderMid}`, display: 'flex', alignItems: 'baseline', gap: spacing.gapMd, flexWrap: 'wrap' }}>
+            <span style={{ minWidth: 70, fontWeight: 600, color: colors.textSecondary }}>No group ({noGroup.length})</span>
+            {noGroup.map(p => (
+              <NoGroupMember
+                key={p.participant_id}
+                p={p}
+                destinations={destinations}
+                onPlace={async (dest) => { setError(null); try { await moveSeat(p.participant_id, dest) } catch (e) { setError(`Place: ${e instanceof Error ? e.message : 'failed'}`) } }}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>,
     host,
+  )
+}
+
+// One ungrouped student in the No Group pool: name + a "place in…" picker (free-seat groups + New
+// group). No emails/status here (consistent with the strip); the "New group" flow confirms first.
+function NoGroupMember({
+  p, destinations, onPlace,
+}: {
+  p: { participant_id: string; name: string }
+  destinations: { id: string; n: number | null }[]
+  onPlace: (dest: string) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const doDest = async (dest: string) => {
+    if (!dest) return
+    if (dest === '__new__') { if (!window.confirm(`Create a new group with ${p.name}?`)) return; setBusy(true); await onPlace('new'); setBusy(false); return }
+    setBusy(true); await onPlace(dest); setBusy(false)
+  }
+  return (
+    <span data-testid="crisis-nogroup-member" style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm }}>
+      <span style={{ color: colors.textStrong }}>{p.name}</span>
+      <select data-testid={`crisis-nogroup-move-${p.participant_id}`} value="" disabled={busy} onChange={e => { const v = e.target.value; e.currentTarget.value = ''; void doDest(v) }} style={{ fontSize: typography.sizeXs }}>
+        <option value="" disabled>place in…</option>
+        {destinations.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
+        <option value="__new__">→ New group</option>
+      </select>
+    </span>
   )
 }
 
@@ -203,10 +248,14 @@ function StripActions({
   // them (moveSeat with an empty target — the seat becomes empty). Remove is confirmed first.
   const doDest = async (dest: string) => {
     if (!member) return
+    const name = live?.members.find(m => m.participant_id === member)?.display_name ?? 'this student'
     if (dest === '__remove__') {
-      const name = live?.members.find(m => m.participant_id === member)?.display_name ?? 'this student'
       if (!window.confirm(`Remove ${name} from Group ${g.groupNumber}? Their seat becomes empty.`)) return
       setBusy(true); await onMove(member, ''); setMember(''); setBusy(false); return // '' target = ungroup
+    }
+    if (dest === '__new__') {
+      if (!window.confirm(`Create a new group with ${name}?`)) return
+      setBusy(true); await onMove(member, 'new'); setMember(''); setBusy(false); return // 'new' = create+place
     }
     setBusy(true); await onMove(member, dest); setMember(''); setBusy(false)
   }
@@ -222,7 +271,6 @@ function StripActions({
   // dropdown says so; it becomes usable the moment a seat opens. Fill shows only when this group
   // actually has empty seats.
   const hasMembers = live.members.length > 0
-  const noDest = otherDests.length === 0
 
   return (
     <span data-testid={`crisis-strip-actions-${g.groupNumber}`} style={{ display: 'inline-flex', alignItems: 'center', gap: spacing.gapSm, flexWrap: 'wrap' }}>
@@ -235,8 +283,9 @@ function StripActions({
           {/* Enabled whenever a member is picked — "Remove from group" is always available even
               when no group has a free seat (the full-class case). */}
           <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doDest(d) }} style={{ fontSize: typography.sizeXs }}>
-            <option value="" disabled>{noDest ? 'move to… (no group has a free seat)' : 'move to…'}</option>
+            <option value="" disabled>move to…</option>
             {otherDests.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
+            <option data-testid={`crisis-strip-new-${g.groupNumber}`} value="__new__">→ New group</option>
             <option data-testid={`crisis-strip-remove-${g.groupNumber}`} value="__remove__">— Remove from group</option>
           </select>
         </>

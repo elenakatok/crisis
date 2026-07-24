@@ -336,11 +336,11 @@ function PreGameWaiting({ participantId, gameInstanceId, groupId }: { participan
   const members = (g?.members as import('../api').OnlineMember[] | undefined) ?? []
   const arrived = new Set((g?.arrived as string[] | undefined) ?? [])
   const botCount = ((g?.bot_participants as string[] | undefined) ?? []).length
-  const total = ((g?.player_participants as string[] | undefined) ?? []).length
+  const total = 3 // Crisis groups are fixed at 3 — a short/solo group reads "1 of 3", never "1 of 1"
   // The viewer is "here" by definition; other humans once their poll has registered in `arrived`.
   const humansPresent = members.filter(m => m.participant_id === participantId || arrived.has(m.participant_id)).length
   const present = humansPresent + botCount
-  const haveCount = online && total > 0
+  const haveCount = online
 
   if (!online) {
     return (

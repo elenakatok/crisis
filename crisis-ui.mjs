@@ -707,6 +707,69 @@ async function main() {
     await pr.close()
   }
 
+  // (13) O2.3 — No Group pool + "→ New group" destination + solo "1 of 3"
+  banner('(13) O2.3 — No Group row, New group destination, solo waiting "1 of 3"')
+  {
+    const gid = 'ui-o23'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 4; i++) await fsWrite(gid, `participants/y${i}`, { participant_id: `y${i}`, game_instance_id: gid, role: 'player', is_bot: false, prep_status: 'complete', name: `Yara ${i}`, email: `y${i}@ex.edu` })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: gid } })
+    const dash = await ctx.newPage()
+    dash.on('dialog', d => d.accept()) // auto-accept the "Create a new group…?" confirm
+    await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dash.waitForSelector('[data-testid="crisis-strip-move-member-1"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2500)
+
+    // (13a) No Group row HIDDEN when everyone is grouped; (13b) "→ New group" in a group's dropdown
+    check(!(await testidPresent(dash, 'crisis-nogroup-row')), '(13a) No Group row hidden when everyone is grouped')
+    check(await testidPresent(dash, 'crisis-strip-new-1'), '(13b) a grouped student\'s move dropdown offers "→ New group"')
+
+    // (13c) ungroup a student (callable) → No Group row appears + lists them (live via the poll)
+    const og = (await callFn('getOnlineGroups', { _dev: { game_instance_id: gid } })).result.groups
+    const victim = og.find(x => x.size === 3).members[0].participant_id
+    await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: victim, target_group_id: '' })
+    await dash.waitForSelector('[data-testid="crisis-nogroup-row"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(dash, 'crisis-nogroup-row'), '(13c) No Group row appears after an ungroup')
+    check(await testidPresent(dash, `crisis-nogroup-move-${victim}`), '(13c) No Group row lists the ungrouped student with a place-in control')
+
+    // (13d) "→ New group" from the No Group row → the student gets a fresh solo group; pool empties
+    await dash.selectOption(`[data-testid="crisis-nogroup-move-${victim}"]`, '__new__')
+    await dash.waitForFunction(() => !document.querySelector('[data-testid="crisis-nogroup-row"]'), null, { timeout: 8000 }).catch(() => {})
+    check(!(await testidPresent(dash, 'crisis-nogroup-row')), '(13d) No Group row hidden again after placing the student in a new group')
+    const solo = (await callFn('getOnlineGroups', { _dev: { game_instance_id: gid } })).result.groups.find(x => x.size === 1 && x.members.some(m => m.participant_id === victim))
+    check(!!solo, '(13d) "→ New group" placed the student in a fresh solo group')
+    await dash.close()
+
+    // (13e) the solo student sees the waiting screen with "1 of 3" — never a started game
+    const sp = await ctx.newPage()
+    await sp.goto(studentUrl(gid, victim))
+    await sp.waitForSelector('[data-testid="crisis-online-reveal"]', { timeout: 30000 }).catch(() => {})
+    if (await testidPresent(sp, 'crisis-online-reveal')) await sp.click('[data-testid="crisis-reveal-continue"]')
+    await sp.waitForSelector('[data-testid="crisis-waiting-count"]', { timeout: 15000 }).catch(() => {})
+    check(/1 of 3/.test(await sp.textContent('[data-testid="crisis-waiting-start"]')), '(13e) solo student in a fresh group sees "1 of 3"')
+    check(!(await testidPresent(sp, 'crisis-role')), '(13e) solo student is NOT in a started game (no active round)')
+    await sp.close()
+
+    // (13f) two ungrouped students → placed together into one new group → playable after bot-fill
+    await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: 'y1', target_group_id: '' }) // ungroup y1
+    await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: 'y2', target_group_id: '' }) // ungroup y2
+    const nw = await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: 'y1', target_group_id: 'new' }) // y1 → new group
+    await callFn('moveSeat', { _dev: { game_instance_id: gid }, participant_id: 'y2', target_group_id: nw.result.new_group }) // y2 into it
+    await callFn('topUpGroupWithBots', { _dev: { game_instance_id: gid }, group_id: nw.result.new_group })
+    const opened = await callFn('openRound', { _dev: { game_instance_id: gid, seed: 1 }, group_id: nw.result.new_group })
+    check(opened.ok && opened.result.ok, '(13f) two ungrouped students share a new group that plays after bot-fill')
+
+    // classroom mode renders nothing new (no No Group row)
+    const cg = 'ui-o23-classroom'
+    await fsWrite(cg, 'config/main', { clock_mode: 'on' })
+    const dc = await ctx.newPage()
+    await dc.goto(`${FE}/dashboard?_dev_game_instance_id=${cg}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dc.waitForSelector('[data-testid="crisis-mode-switch"]', { timeout: 30000 }).catch(() => {})
+    await sleep(3000)
+    check(!(await testidPresent(dc, 'crisis-nogroup-row')), '(13) classroom: No Group row not rendered (nothing new in classroom mode)')
+    await dc.close()
+  }
+
   await browser.close()
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)

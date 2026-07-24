@@ -297,36 +297,37 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
   }
 
   return db.runTransaction(async (tx) => {
+    // ── reads first ──
     const pRef = instanceRef.collection('participants').doc(participantId)
     const pSnap = await tx.get(pRef)
     if (!pSnap.exists) throw new HttpsError('not-found', 'Participant not found.')
     const p = pSnap.data() as Record<string, unknown>
     if (p['is_bot'] === true) throw new HttpsError('failed-precondition', 'Only human participants can be moved.')
+    // Source is OPTIONAL: a No Group / late student (no group_id) is PLACED into the target.
     const sourceGroupId = p['group_id'] as string | undefined
-    if (!sourceGroupId) throw new HttpsError('failed-precondition', 'Participant is not in a group.')
     if (sourceGroupId === targetGroupId) return { ok: true as const, moved: false, reason: 'already in target group' }
 
-    const sourceRef = instanceRef.collection('groups').doc(sourceGroupId)
     const targetRef = instanceRef.collection('groups').doc(targetGroupId)
-    const [sourceSnap, targetSnap] = await Promise.all([tx.get(sourceRef), tx.get(targetRef)])
-    if (!sourceSnap.exists || !targetSnap.exists) throw new HttpsError('not-found', 'Group not found.')
-    const source = sourceSnap.data() as Record<string, unknown>
+    const targetSnap = await tx.get(targetRef)
+    if (!targetSnap.exists) throw new HttpsError('not-found', 'Group not found.')
     const target = targetSnap.data() as Record<string, unknown>
-
-    // LOCK GUARD (spec §3): a move into or out of a group that has started playing is
-    // incoherent — refuse rather than fork a live game.
-    if (source['seats_locked_at'] != null || target['seats_locked_at'] != null) {
-      throw new HttpsError('failed-precondition', 'One of the groups has already started playing (seats are locked).')
-    }
-
+    if (target['seats_locked_at'] != null) throw new HttpsError('failed-precondition', 'The destination group has already started playing (seats are locked).')
     const targetPlayers = (target['player_participants'] as string[] | undefined) ?? []
-    if (targetPlayers.length >= GROUP_SIZE) {
-      throw new HttpsError('failed-precondition', 'The destination group is already full (3 seats).')
+    if (targetPlayers.length >= GROUP_SIZE) throw new HttpsError('failed-precondition', 'The destination group is already full (3 seats).')
+
+    const sourceRef = sourceGroupId ? instanceRef.collection('groups').doc(sourceGroupId) : null
+    let source: Record<string, unknown> | null = null
+    let newSource: string[] = []
+    if (sourceRef) {
+      const sourceSnap = await tx.get(sourceRef)
+      if (!sourceSnap.exists) throw new HttpsError('not-found', 'Group not found.')
+      source = sourceSnap.data() as Record<string, unknown>
+      if (source['seats_locked_at'] != null) throw new HttpsError('failed-precondition', 'The source group has already started playing (seats are locked).')
+      newSource = ((source['player_participants'] as string[] | undefined) ?? []).filter((x) => x !== participantId)
     }
 
-    const newSource = ((source['player_participants'] as string[] | undefined) ?? []).filter((x) => x !== participantId)
     const newTarget = [...targetPlayers, participantId]
-    const sourceBots = new Set((source['bot_participants'] as string[] | undefined) ?? [])
+    const sourceBots = new Set((source?.['bot_participants'] as string[] | undefined) ?? [])
     const targetBots = new Set((target['bot_participants'] as string[] | undefined) ?? [])
 
     // Read every human doc in both final groups for members[]/member_logins/lead rebuild.
@@ -334,30 +335,23 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
     const humanSnaps = humanPids.length ? await tx.getAll(...humanPids.map((id) => instanceRef.collection('participants').doc(id))) : []
     const dataById = new Map<string, Record<string, unknown>>(humanSnaps.map((s) => [s.id, (s.data() ?? {}) as Record<string, unknown>]))
 
-    const src = buildMembership(newSource, sourceBots, dataById)
     const tgt = buildMembership(newTarget, targetBots, dataById)
 
-    // Source group — left standing even if now empty (§4.4: an emptied group costs nothing).
-    tx.update(sourceRef, {
-      player_participants: newSource,
-      lead_participant_id: src.lead,
-      members: src.members,
-      member_logins: src.member_logins,
-    })
-    tx.update(targetRef, {
-      player_participants: newTarget,
-      lead_participant_id: tgt.lead,
-      members: tgt.members,
-      member_logins: tgt.member_logins,
-    })
+    // ── writes ──
+    if (sourceRef && source) {
+      const src = buildMembership(newSource, sourceBots, dataById)
+      // Source group — left standing even if now empty (§4.4: an emptied group costs nothing).
+      tx.update(sourceRef, { player_participants: newSource, lead_participant_id: src.lead, members: src.members, member_logins: src.member_logins })
+      for (const pid of newSource) if (!sourceBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
+    }
+    tx.update(targetRef, { player_participants: newTarget, lead_participant_id: tgt.lead, members: tgt.members, member_logins: tgt.member_logins })
 
-    // The moved participant → target group. Re-stamp is_lead on every human in BOTH groups so
-    // exactly the (recomputed) leads carry it (cheap: ≤5 humans total).
-    tx.update(pRef, { group_id: targetGroupId, is_lead: participantId === tgt.lead })
-    for (const pid of newSource) if (!sourceBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
+    // The moved/placed participant → target group. role:'player' covers a late/role-less No Group
+    // student (idempotent for an already-roled student).
+    tx.update(pRef, { group_id: targetGroupId, is_lead: participantId === tgt.lead, role: 'player' })
     for (const pid of newTarget) if (!targetBots.has(pid) && pid !== participantId) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === tgt.lead })
 
-    return { ok: true as const, moved: true, source_group: sourceGroupId, target_group: targetGroupId }
+    return { ok: true as const, moved: true, source_group: sourceGroupId ?? null, target_group: targetGroupId }
   })
 }
 
@@ -415,15 +409,88 @@ async function ungroupCore(gameInstanceId: string, participantId: string) {
   })
 }
 
+// CREATE-NEW-GROUP (§O2.3) — the seat-move machinery with "new" as the destination: place a
+// student (from another group OR from the No Group pool) into a brand-new group of their own.
+// The new group doc is FIELD-FOR-FIELD identical to a groupParticipantsOnline group (same
+// buildMembership, same status/arrays), so bot-fill, auto-open, lock and the move guards all
+// behave identically to an O1-created group. Same generality note as moveSeatCore.
+async function createNewGroupCore(gameInstanceId: string, participantId: string) {
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+
+  const configSnap = await instanceRef.collection('config').doc('main').get()
+  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
+    throw new HttpsError('failed-precondition', 'Creating a group is an online-mode action.')
+  }
+
+  return db.runTransaction(async (tx) => {
+    // ── reads first (Firestore: all reads before any writes) ──
+    const pRef = instanceRef.collection('participants').doc(participantId)
+    const pSnap = await tx.get(pRef)
+    if (!pSnap.exists) throw new HttpsError('not-found', 'Participant not found.')
+    const p = pSnap.data() as Record<string, unknown>
+    if (p['is_bot'] === true) throw new HttpsError('failed-precondition', 'Only human participants can be grouped.')
+
+    const sourceGroupId = p['group_id'] as string | undefined
+    let source: Record<string, unknown> | null = null
+    let sourceRef: FirebaseFirestore.DocumentReference | null = null
+    let newSource: string[] = []
+    let sourceHumanData = new Map<string, Record<string, unknown>>()
+    if (sourceGroupId) {
+      sourceRef = instanceRef.collection('groups').doc(sourceGroupId)
+      const sSnap = await tx.get(sourceRef)
+      if (sSnap.exists) {
+        source = sSnap.data() as Record<string, unknown>
+        if (source['seats_locked_at'] != null) throw new HttpsError('failed-precondition', 'The source group has already started playing (seats are locked).')
+        newSource = ((source['player_participants'] as string[] | undefined) ?? []).filter((x) => x !== participantId)
+        const sourceBots = new Set((source['bot_participants'] as string[] | undefined) ?? [])
+        const humanPids = newSource.filter((x) => !sourceBots.has(x))
+        const snaps = humanPids.length ? await tx.getAll(...humanPids.map((id) => instanceRef.collection('participants').doc(id))) : []
+        sourceHumanData = new Map(snaps.map((s) => [s.id, (s.data() ?? {}) as Record<string, unknown>]))
+      }
+    }
+
+    // ── writes ──
+    const newGroupId = randomUUID()
+    const now = FieldValue.serverTimestamp()
+    const nm = buildMembership([participantId], new Set(), new Map([[participantId, p]]))
+    tx.set(instanceRef.collection('groups').doc(newGroupId), {
+      group_id: newGroupId,
+      game_instance_id: gameInstanceId,
+      player_participants: [participantId],
+      bot_participants: [],
+      bot_count: 0,
+      bot_types: {},
+      lead_participant_id: participantId,
+      members: nm.members,
+      member_logins: nm.member_logins,
+      outcome: null,
+      status: 'matched',
+      matched_at: now,
+    })
+    tx.update(pRef, { group_id: newGroupId, is_lead: true, role: 'player' })
+
+    if (source && sourceRef) {
+      const sourceBots = new Set((source['bot_participants'] as string[] | undefined) ?? [])
+      const src = buildMembership(newSource, sourceBots, sourceHumanData)
+      tx.update(sourceRef, { player_participants: newSource, lead_participant_id: src.lead, members: src.members, member_logins: src.member_logins })
+      for (const pid of newSource) if (!sourceBots.has(pid)) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
+    }
+
+    return { ok: true as const, created: true, new_group: newGroupId }
+  })
+}
+
 export const moveSeat = onCall(CORS, async (request: CallableRequest) => {
   const data = request.data as Record<string, unknown>
   const gameInstanceId = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
   const participantId = String(data['participant_id'] ?? '')
   if (!participantId) throw new HttpsError('invalid-argument', 'participant_id required')
   const targetGroupId = String(data['target_group_id'] ?? '')
-  // Empty target = UNGROUP (remove from the current group; seat becomes empty). Same callable —
-  // no new binding needed.
+  // Sentinels on the SAME callable (no new binding): '' = ungroup; 'new' = create a fresh group;
+  // any real group id = move into it. (group ids are UUIDs, never '' or 'new'.)
   if (!targetGroupId) return ungroupCore(gameInstanceId, participantId)
+  if (targetGroupId === 'new') return createNewGroupCore(gameInstanceId, participantId)
   return moveSeatCore(gameInstanceId, participantId, targetGroupId)
 })
 

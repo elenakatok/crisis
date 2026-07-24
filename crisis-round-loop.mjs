@@ -1120,6 +1120,78 @@ async function main() {
     check(b30.result.ok, '(O10) bid 30 accepted (value ceiling, inclusive)')
   }
 
+  // (O11) CREATE-NEW-GROUP (§O2.3) — moveSeat("new") makes a group identical to generator output;
+  // compose: second student moved in, bot-fill completes, auto-open only when full, lock guard.
+  banner('(O11) create-new-group via moveSeat("new") + compose (move-in, bot-fill, auto-open, lock)')
+  {
+    const gid = 'o2-newgroup'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `n${i}`, `N ${i}`, `n${i}@ex.edu`)
+    await groupOnline(gid) // 3 → one full group g0
+    const g0 = (await onlineGroups(gid)).groups[0]
+    const m0 = g0.members[0].participant_id, m1 = g0.members[1].participant_id
+
+    const r = await moveSeatFn(gid, m0, 'new')
+    check(r.ok && r.result.created, '(O11) create-new-group via moveSeat("new") ok')
+    const newGid = r.result.new_group
+    const ng = await groupDoc(gid, newGid)
+    const gen = await groupDoc(gid, g0.group_id) // a generator group (now 2 members)
+    check(JSON.stringify(Object.keys(ng).sort()) === JSON.stringify(Object.keys(gen).sort()), '(O11) new group doc has the SAME fields as a generator group (field-for-field)')
+    check(ng.status?.stringValue === 'matched' && ng.bot_count?.integerValue === '0' && arrVal(ng.bot_participants).length === 0, '(O11) new group: status matched, 0 bots')
+    check(arrVal(ng.player_participants).length === 1 && ng.lead_participant_id?.stringValue === m0, '(O11) new group: 1 player, lead = the moved student')
+    check(membersRaw(ng).length === 1 && membersRaw(ng)[0].pid === m0, '(O11) new group members[] = the moved student')
+    check(arrVal(gen.player_participants).length === 2, '(O11) source group shrank to 2')
+
+    // second student moved IN (normal move) → 2 humans (short)
+    const r2 = await moveSeatFn(gid, m1, newGid)
+    check(r2.ok && r2.result.moved, '(O11) a second student moves into the new group (now 2)')
+    // SHORT (2 humans, 0 bots): even both arriving does NOT auto-open (not a full group of 3)
+    await rviewG(gid, newGid, m0)
+    check(!(await rviewG(gid, newGid, m1)).ok, '(O11) a SHORT new group (2 humans) does NOT auto-open even when both arrive')
+    // bot-fill completes it to 3
+    const tf = await topUpFn(gid, newGid)
+    check(tf.ok && tf.result.added === 1, '(O11) bot-fill the new group (1 bot → full)')
+    // FULL: arrivals only register once the group is full (a short group's polls no-op before the
+    // arrayUnion) — so BOTH humans poll now; the last one's arrival auto-opens (clock off).
+    await rviewG(gid, newGid, m0)
+    const vFull = await rviewG(gid, newGid, m1)
+    check(vFull.ok && vFull.result.ok && vFull.result.clockEnabled === false, '(O11) once FULL the new group auto-opens (clock off)')
+
+    // lock guard applies identically: first submission locks; move OUT then rejected
+    const rm = await roleMapG(gid, newGid)
+    const botPids = new Set(arrVal((await groupDoc(gid, newGid)).bot_participants))
+    const humanSeller = [rm.seller1, rm.seller2].find(pid => !botPids.has(pid))
+    await bidG(gid, newGid, humanSeller, 15)
+    check((await groupDoc(gid, newGid)).seats_locked_at != null, '(O11) new group locks on first submission (same as a generator group)')
+    const mvLocked = await moveSeatFn(gid, humanSeller, g0.group_id)
+    check(!mvLocked.ok && /lock/i.test(mvLocked.error || ''), '(O11) per-group lock guard applies to the new group (move OUT rejected)')
+  }
+
+  // (O12) ungroup the LAST member of a new group — empty group stands, accepts a move-in later
+  banner('(O12) empty group ≠ dead — stands, never auto-opens, never blocks re-group, accepts move-in')
+  {
+    const gid = 'o2-emptygroup'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 2; i++) await seedOnline(gid, `e${i}`, `E ${i}`, `e${i}@ex.edu`)
+    await groupOnline(gid) // 2 → one short group
+    const grp = (await onlineGroups(gid)).groups[0]
+    const e0 = grp.members[0].participant_id
+    const newGid = (await moveSeatFn(gid, e0, 'new')).result.new_group // new solo group with e0
+
+    const ung = await moveSeatFn(gid, e0, '') // ungroup the ONLY member
+    check(ung.ok && ung.result.removed, '(O12) ungrouped the last member of the new group')
+    const eg = await groupDoc(gid, newGid)
+    check(arrVal(eg.player_participants).length === 0 && membersRaw(eg).length === 0, '(O12) new group is EMPTY but still stands (not deleted)')
+    check(eg.seats_locked_at === undefined, '(O12) empty group has no lock — does not block re-group')
+
+    // accepts a move-in later (empty ≠ dead): place e0 back into the empty group
+    const back = await moveSeatFn(gid, e0, newGid)
+    check(back.ok && back.result.moved, '(O12) the empty group accepts a move-in later (empty ≠ dead)')
+    check(arrVal((await groupDoc(gid, newGid)).player_participants).length === 1, '(O12) the group has 1 member again')
+    // does not block a re-group
+    check((await groupOnline(gid)).ok, '(O12) an empty group never blocks re-group')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))
