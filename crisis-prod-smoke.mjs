@@ -86,7 +86,7 @@ async function actOnce(page, st, seatType) {
       await page.fill('[data-testid="crisis-alloc-2"]', String(a2))
       await page.click('[data-testid="crisis-submit"]'); return true
     }
-    if (st.owes === 'fix') { await page.click(sellerDefaultFix(seatType) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]'); return true }
+    if (st.owes === 'fix') { await page.click(sellerDefaultFix(seatType) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]'); await page.click('[data-testid="crisis-fix-submit"]'); return true }
   } catch { /* screen advanced between read+act */ }
   return false
 }

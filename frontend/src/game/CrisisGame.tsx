@@ -187,10 +187,7 @@ export default function CrisisGame({
           <li>If you do NOT fix, the Buyer (value {CRISIS.buyerValue}) pays <strong>{CRISIS.buyerRepair}</strong>/unit on your units.</li>
           <li>{otherLabel} — bid {otherBid}, units {otherAlloc}.</li>
         </ul>
-        <div style={{ display: 'flex', gap: spacing.gapBtn }}>
-          <button data-testid="crisis-fix-yes" style={primaryBtn} disabled={submitting} onClick={() => act(() => submitFix(groupId, true))}>Yes — fix it</button>
-          <button data-testid="crisis-fix-no" style={{ ...primaryBtn, background: 'none', color: colors.text, border: `1px solid ${colors.borderLight}` }} disabled={submitting} onClick={() => act(() => submitFix(groupId, false))}>No — do not fix</button>
-        </div>
+        <FixForm submitting={submitting} onSubmit={(fixed) => act(() => submitFix(groupId, fixed))} />
         {waitingBanner(waitingOnYou)}
         {submitError && <ErrorNote msg={submitError} />}
         <HistorySection history={view.history} viewerRole={view.role} />
@@ -220,16 +217,60 @@ export default function CrisisGame({
 function BidForm({ submitting, onSubmit }: { submitting: boolean; onSubmit: (bid: number) => void }) {
   const [val, setVal] = useState('')
   const n = Number(val)
-  const valid = val.trim() !== '' && Number.isInteger(n) && n >= 0
+  const inRange = Number.isInteger(n) && n >= 10 && n <= 30 // §1.1: cost floor 10, buyer-value ceiling 30 (inclusive)
+  const valid = val.trim() !== '' && inRange
+  const showErr = val.trim() !== '' && !inRange
   return (
     <form onSubmit={(e) => { e.preventDefault(); if (valid) onSubmit(n) }} style={{ margin: `${spacing.gapMd} 0` }}>
       <label style={{ display: 'block', marginBottom: spacing.gapSm, fontWeight: 600 }}>Your price per unit</label>
       <input data-testid="crisis-bid-input" style={numInput} value={val} inputMode="numeric"
         onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ''))} disabled={submitting} autoFocus />
+      <div style={{ marginTop: spacing.gapSm, fontSize: '0.8rem', color: colors.textSecondary }}>
+        Enter a whole number between <strong>10</strong> and <strong>30</strong>.
+      </div>
+      {showErr && (
+        <p data-testid="crisis-bid-error" style={{ color: '#b91c1c', fontSize: '0.8rem', margin: `${spacing.gapSm} 0 0` }}>
+          Your price must be between 10 and 30.
+        </p>
+      )}
       <div style={{ marginTop: spacing.gapMd }}>
         <button data-testid="crisis-submit" type="submit" style={primaryBtn} disabled={!valid || submitting}>{submitting ? 'Submitting…' : 'Submit bid'}</button>
       </div>
     </form>
+  )
+}
+
+// Fix decision — NEUTRAL until the student picks (§O2.2 step 3): both options render identically
+// with no default/highlight; the chosen one gets a border+tint ONLY after it is clicked, and
+// Submit is disabled until a choice is made. (A timeout still applies the server default table
+// unchanged — this only governs the on-screen presentation.)
+function FixForm({ submitting, onSubmit }: { submitting: boolean; onSubmit: (fixed: boolean) => void }) {
+  const [choice, setChoice] = useState<boolean | null>(null)
+  const opt = (selected: boolean): React.CSSProperties => ({
+    padding: '0.5rem 1.1rem', fontSize: '1rem', cursor: 'pointer', borderRadius: 4,
+    background: selected ? colors.confirmBg : 'none',
+    color: colors.text,
+    border: `1px solid ${selected ? colors.text : colors.borderLight}`,
+    fontWeight: selected ? 700 : 500,
+  })
+  return (
+    <div style={{ margin: `${spacing.gapMd} 0` }}>
+      <div role="radiogroup" aria-label="Fix the crisis?" style={{ display: 'flex', gap: spacing.gapBtn }}>
+        <button data-testid="crisis-fix-yes" type="button" role="radio" aria-checked={choice === true} style={opt(choice === true)} disabled={submitting} onClick={() => setChoice(true)}>Yes — fix it</button>
+        <button data-testid="crisis-fix-no" type="button" role="radio" aria-checked={choice === false} style={opt(choice === false)} disabled={submitting} onClick={() => setChoice(false)}>No — do not fix</button>
+      </div>
+      <div style={{ marginTop: spacing.gapMd }}>
+        <button
+          data-testid="crisis-fix-submit"
+          type="button"
+          style={primaryBtn}
+          disabled={choice === null || submitting}
+          onClick={() => { if (choice !== null) onSubmit(choice) }}
+        >
+          {submitting ? 'Submitting…' : 'Submit decision'}
+        </button>
+      </div>
+    </div>
   )
 }
 

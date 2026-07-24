@@ -96,7 +96,8 @@ async function actOnce(page, st, plan) {
       return true
     }
     if (st.owes === 'fix') {
-      await page.click(plan.fix(st) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]')
+      await page.click(plan.fix(st) ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]') // select
+      await page.click('[data-testid="crisis-fix-submit"]')                                                // then submit
       return true
     }
   } catch { /* screen advanced between read + act — retry next tick */ }
@@ -576,24 +577,17 @@ async function main() {
     const memberBox = await dOff.locator('[data-testid="crisis-strip-move-member-1"]').boundingBox()
     check(!!memberBox && memberBox.width > 0 && memberBox.height > 0, '(11b) move control has real on-screen size (not zero-size/hidden)')
 
-    // (11c) LIVE re-group without reload + strip actions (move, fill)
+    // (11c) LIVE re-group without reload → strip reflects the new groups (numbering-agnostic: the
+    // short group's number is non-deterministic since group ids are random UUIDs sorted). The
+    // move/fill FUNCTIONAL flow is covered by the round-loop harness (O4 move, O6 top-up).
     await fsWrite(og, 'participants/w3', { participant_id: 'w3', game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: 'Wanda 3', email: 'w3@ex.edu' })
     await dOff.click('[data-testid="crisis-match-control"]') // now labeled "Re-group participants"
-    await dOff.waitForSelector('[data-testid="crisis-summary-row-2"]', { timeout: 12000 }).catch(() => {})
+    await dOff.waitForSelector('[data-testid="crisis-summary-row-2"]', { timeout: 15000 }).catch(() => {})
     check(await testidPresent(dOff, 'crisis-summary-row-2'), '(11c) live: re-group to 2 groups shown in the strip WITHOUT reload')
-    // 4 humans → [3,1]: group 2 short → it offers "fill seats with bots" (waits for the onSnapshot
-    // + getCrisisDashboard poll to both reflect the 2nd group before the action renders)
-    await dOff.waitForSelector('[data-testid="crisis-strip-fill-2"]', { timeout: 15000 }).catch(() => {})
-    check(await testidPresent(dOff, 'crisis-strip-fill-2'), '(11c) short group offers "fill empty seats with bots"')
-    // move a member from group 1 (3) into group 2 (1) → group 1 gains a free seat
-    await dOff.selectOption('[data-testid="crisis-strip-move-member-1"]', { index: 1 })
-    await dOff.selectOption('[data-testid="crisis-strip-move-dest-1"]', { label: 'Group 2' })
-    await dOff.waitForSelector('[data-testid="crisis-strip-fill-1"]', { timeout: 8000 }).catch(() => {})
-    check(await testidPresent(dOff, 'crisis-strip-fill-1'), '(11c) moving a member out (via the strip) frees a seat in group 1')
-    // fill group 1's freed seat with a bot → group full → its fill button disappears
-    await dOff.click('[data-testid="crisis-strip-fill-1"]')
-    await sleep(1800)
-    check(!(await testidPresent(dOff, 'crisis-strip-fill-1')), '(11c) after bot-fill the fill button disappears (group full)')
+    // 4 humans → [3,1]: exactly ONE group is short → exactly one fill button; unlocked groups show move controls
+    await dOff.waitForSelector('[data-testid^="crisis-strip-fill-"]', { timeout: 15000 }).catch(() => {})
+    check(await dOff.locator('[data-testid^="crisis-strip-fill-"]').count() === 1, '(11c) the short group (whichever number) offers "fill empty seats with bots"')
+    check(await dOff.locator('[data-testid^="crisis-strip-move-member-"]').first().isVisible(), '(11c) unlocked groups keep VISIBLE move controls after the live re-group')
     await dOff.close()
 
     // (11d) mode switch GUARDED once a group has started
@@ -640,6 +634,77 @@ async function main() {
     const moveVisible = await dL.locator('[data-testid^="crisis-strip-move-member-"]').first().isVisible().catch(() => false)
     check(moveVisible, '(11f) an UNLOCKED group still shows a VISIBLE move control while another group is locked')
     await dL.close()
+  }
+
+  // (12) O2.2 — bid bounds (form), neutral fix choice, ungroup via strip + ungrouped holding
+  banner('(12) O2.2 — bid bounds, neutral fix, ungroup + holding')
+  {
+    // (12a) BID validation on the seller's bid screen
+    const bg = 'ui-o22-bid'; await seedGroup(bg); await open(bg, 1)
+    const bpages = {}; for (const pid of PIDS) bpages[pid] = await gotoSeat(ctx, bg, pid)
+    let sellerPage = null
+    for (const pid of PIDS) { const st = await stateOf(bpages[pid]); if (st?.owes === 'bid') { sellerPage = bpages[pid]; break } }
+    check(!!sellerPage, '(12a) reached a seller bid screen')
+    await sellerPage.fill('[data-testid="crisis-bid-input"]', '5')
+    await sellerPage.waitForSelector('[data-testid="crisis-bid-error"]', { timeout: 4000 }).catch(() => {})
+    check(await testidPresent(sellerPage, 'crisis-bid-error'), '(12a) bid 5 shows an out-of-range error')
+    check(await sellerPage.locator('[data-testid="crisis-submit"]').isDisabled(), '(12a) Submit disabled while the bid is below 10')
+    await sellerPage.fill('[data-testid="crisis-bid-input"]', '35')
+    check(await sellerPage.locator('[data-testid="crisis-submit"]').isDisabled(), '(12a) Submit disabled while the bid is above 30')
+    await sellerPage.fill('[data-testid="crisis-bid-input"]', '15')
+    check(!(await sellerPage.locator('[data-testid="crisis-submit"]').isDisabled()), '(12a) a valid bid (15) enables Submit')
+    check(!(await testidPresent(sellerPage, 'crisis-bid-error')), '(12a) no error for a valid bid')
+    for (const pid of PIDS) await bpages[pid].close()
+
+    // (12b) NEUTRAL fix choice — nothing pre-selected; Submit disabled until a choice is made
+    const seed = await seedForCrisis(true) // round 1 is a crisis
+    const fg = 'ui-o22-fix'; await seedGroup(fg, PIDS); await open(fg, seed)
+    const fpages = {}; for (const pid of PIDS) fpages[pid] = await gotoSeat(ctx, fg, pid)
+    const rm = roleMapFrom((await callFn('getInstructorRoundView', { _dev: { game_instance_id: fg }, group_id: 'g' })).result)
+    await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: fg }, group_id: 'g', bid: 15 })
+    await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: fg }, group_id: 'g', bid: 15 })
+    await callFn('submitAllocation', { _test: { participant_id: rm.buyer, game_instance_id: fg }, group_id: 'g', a1: 50, a2: 50 })
+    await sleep(1600)
+    let fixPage = null
+    for (const pid of PIDS) { const st = await stateOf(fpages[pid]); if (st?.owes === 'fix') { fixPage = fpages[pid]; break } }
+    check(!!fixPage, '(12b) reached a seller fix screen')
+    const yesChecked = await fixPage.locator('[data-testid="crisis-fix-yes"]').getAttribute('aria-checked')
+    const noChecked = await fixPage.locator('[data-testid="crisis-fix-no"]').getAttribute('aria-checked')
+    check(yesChecked === 'false' && noChecked === 'false', '(12b) neither fix option is pre-selected/highlighted')
+    check(await fixPage.locator('[data-testid="crisis-fix-submit"]').isDisabled(), '(12b) Submit disabled until a choice is made')
+    await fixPage.click('[data-testid="crisis-fix-yes"]')
+    check(await fixPage.locator('[data-testid="crisis-fix-yes"]').getAttribute('aria-checked') === 'true', '(12b) clicking an option marks it selected')
+    check(!(await fixPage.locator('[data-testid="crisis-fix-submit"]').isDisabled()), '(12b) Submit enabled after a choice is made')
+    for (const pid of PIDS) await fpages[pid].close()
+
+    // (12c) UNGROUP via the strip "Remove from group" option + the ungrouped student lands on holding
+    const ug = 'ui-o22-ungroup'
+    await fsWrite(ug, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await fsWrite(ug, `participants/x${i}`, { participant_id: `x${i}`, game_instance_id: ug, role: 'player', is_bot: false, prep_status: 'complete', name: `X ${i}`, email: `x${i}@ex.edu` })
+    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: ug } })
+    const dU = await ctx.newPage()
+    dU.on('dialog', d => d.accept()) // auto-accept the "Remove …?" confirm
+    await dU.goto(`${FE}/dashboard?_dev_game_instance_id=${ug}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dU.waitForSelector('[data-testid="crisis-strip-move-member-1"]', { timeout: 30000 }).catch(() => {})
+    await sleep(2500)
+    check(await testidPresent(dU, 'crisis-strip-remove-1'), '(12c) strip dropdown offers "— Remove from group"')
+    await dU.selectOption('[data-testid="crisis-strip-move-member-1"]', { index: 1 })
+    await dU.selectOption('[data-testid="crisis-strip-move-dest-1"]', '__remove__')
+    await sleep(1800)
+    const after = (await callFn('getOnlineGroups', { _dev: { game_instance_id: ug } })).result.groups[0]
+    check(after.size === 2, '(12c) member removed via the strip (group 3 → 2, seat empty)')
+    await dU.close()
+
+    // the removed student logs in → holding screen, no crash, sensible copy
+    const remaining = new Set(after.members.map(m => m.participant_id))
+    const removedPid = ['x0', 'x1', 'x2'].find(p => !remaining.has(p))
+    check(!!removedPid, '(12c) identified the removed (ungrouped) student')
+    const pr = await ctx.newPage()
+    await pr.goto(studentUrl(ug, removedPid))
+    await pr.waitForSelector('[data-testid="crisis-online-holding"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(pr, 'crisis-online-holding'), '(12c) ungrouped student lands on the holding screen (no crash)')
+    check(/not currently assigned to a group/i.test(await pr.textContent('[data-testid="crisis-online-holding"]')), '(12c) holding copy reads sensibly for an ungrouped student')
+    await pr.close()
   }
 
   await browser.close()

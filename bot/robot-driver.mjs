@@ -111,7 +111,8 @@ async function actViaUI(page, view, seatType) {
   }
   if (view.owes === 'fix') {
     const fix = sellerDefaultFix(seatType)
-    await page.click(fix ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]')
+    await page.click(fix ? '[data-testid="crisis-fix-yes"]' : '[data-testid="crisis-fix-no"]') // select
+    await page.click('[data-testid="crisis-fix-submit"]')                                      // then submit
     return `fix ${fix ? 'yes' : 'no'}`
   }
   return null

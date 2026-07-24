@@ -361,12 +361,69 @@ async function moveSeatCore(gameInstanceId: string, participantId: string, targe
   })
 }
 
+// UNGROUP (§O2.2) — the same seat-move machinery with "no group" as the destination: remove a
+// human from their group (e.g. a student who dropped the class), leaving the seat empty and the
+// group standing (playable again via move-in or bot-fill). Same generality note as moveSeatCore:
+// safe as a pure array/lead rewrite because roles are assigned late — nothing to reissue.
+async function ungroupCore(gameInstanceId: string, participantId: string) {
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(gameInstanceId)
+
+  const configSnap = await instanceRef.collection('config').doc('main').get()
+  if (String(configSnap.data()?.['clock_mode'] ?? 'on') !== 'off') {
+    throw new HttpsError('failed-precondition', 'Removing a student from a group is an online-mode action.')
+  }
+
+  return db.runTransaction(async (tx) => {
+    const pRef = instanceRef.collection('participants').doc(participantId)
+    const pSnap = await tx.get(pRef)
+    if (!pSnap.exists) throw new HttpsError('not-found', 'Participant not found.')
+    const p = pSnap.data() as Record<string, unknown>
+    if (p['is_bot'] === true) throw new HttpsError('failed-precondition', 'Only human participants can be removed.')
+    const sourceGroupId = p['group_id'] as string | undefined
+    if (!sourceGroupId) return { ok: true as const, removed: false, reason: 'already not in a group' }
+
+    const sourceRef = instanceRef.collection('groups').doc(sourceGroupId)
+    const sourceSnap = await tx.get(sourceRef)
+    if (!sourceSnap.exists) { // group already gone — just detach the participant
+      tx.update(pRef, { group_id: null, is_lead: false })
+      return { ok: true as const, removed: true }
+    }
+    const source = sourceSnap.data() as Record<string, unknown>
+    if (source['seats_locked_at'] != null) {
+      throw new HttpsError('failed-precondition', 'This group has already started playing (seats are locked).')
+    }
+
+    const newSource = ((source['player_participants'] as string[] | undefined) ?? []).filter((x) => x !== participantId)
+    const sourceBots = new Set((source['bot_participants'] as string[] | undefined) ?? [])
+    const humanPids = newSource.filter((x) => !sourceBots.has(x))
+    const humanSnaps = humanPids.length ? await tx.getAll(...humanPids.map((id) => instanceRef.collection('participants').doc(id))) : []
+    const dataById = new Map<string, Record<string, unknown>>(humanSnaps.map((s) => [s.id, (s.data() ?? {}) as Record<string, unknown>]))
+    const src = buildMembership(newSource, sourceBots, dataById)
+
+    // Group stays standing with the seat now empty; lead recomputed over whoever remains.
+    tx.update(sourceRef, {
+      player_participants: newSource,
+      lead_participant_id: src.lead,
+      members: src.members,
+      member_logins: src.member_logins,
+    })
+    tx.update(pRef, { group_id: null, is_lead: false })
+    for (const pid of newSource) if (!sourceBots.has(pid)) tx.update(instanceRef.collection('participants').doc(pid), { is_lead: pid === src.lead })
+
+    return { ok: true as const, removed: true, source_group: sourceGroupId }
+  })
+}
+
 export const moveSeat = onCall(CORS, async (request: CallableRequest) => {
   const data = request.data as Record<string, unknown>
   const gameInstanceId = await extractInstructorGameId(data, isEmu(), authHeaderOf(request))
   const participantId = String(data['participant_id'] ?? '')
+  if (!participantId) throw new HttpsError('invalid-argument', 'participant_id required')
   const targetGroupId = String(data['target_group_id'] ?? '')
-  if (!participantId || !targetGroupId) throw new HttpsError('invalid-argument', 'participant_id and target_group_id required')
+  // Empty target = UNGROUP (remove from the current group; seat becomes empty). Same callable —
+  // no new binding needed.
+  if (!targetGroupId) return ungroupCore(gameInstanceId, participantId)
   return moveSeatCore(gameInstanceId, participantId, targetGroupId)
 })
 

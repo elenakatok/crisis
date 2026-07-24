@@ -283,10 +283,10 @@ export default function Play() {
 
       {phase.name === 'online_holding' && (
         <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
-          <h1 style={{ marginTop: 0 }}>Not grouped yet</h1>
+          <h1 style={{ marginTop: 0 }}>Not in a group yet</h1>
           <p data-testid="crisis-online-holding" style={{ lineHeight: 1.6, color: colors.textSecondary }}>
-            Your instructor has not formed groups yet. Check back soon — this page will show your
-            group as soon as it does.
+            You are not currently assigned to a group. Check back soon — this page will show your
+            group as soon as your instructor forms or updates the groups.
           </p>
         </main>
       )}

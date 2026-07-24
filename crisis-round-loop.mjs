@@ -1066,6 +1066,60 @@ async function main() {
     check(!tfLocked.ok && /lock/i.test(tfLocked.error || ''), '(O8) bot-fill on the locked group is rejected')
   }
 
+  // (O9) UNGROUP (§O2.2) — moveSeat with empty target removes a human; seat empties, group stands
+  banner('(O9) ungroup — remove a human, lead recomputed, group_id cleared, playable after refill')
+  {
+    const gid = 'o2-ungroup'
+    await fsWrite(gid, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(gid, `u${i}`, `U ${i}`, `u${i}@ex.edu`)
+    await groupOnline(gid) // 3 → one full group
+    const grp = (await onlineGroups(gid)).groups[0]
+    const removed = grp.members[0].participant_id // remove the seat-0 lead
+
+    const r = await moveSeatFn(gid, removed, '') // '' target = UNGROUP
+    check(r.ok && r.result.removed, '(O9) ungroup ok')
+    const gd = await groupDoc(gid, grp.group_id)
+    check(!arrVal(gd.player_participants).includes(removed) && arrVal(gd.player_participants).length === 2, '(O9) member out of player_participants (group now 2)')
+    check(membersRaw(gd).length === 2 && !membersRaw(gd).some(m => m.pid === removed), '(O9) members[] rebuilt without the removed member')
+    check(gd.lead_participant_id?.stringValue === arrVal(gd.player_participants)[0], '(O9) lead recomputed to the new seat 0')
+    const pu = (await fsGet(gid, `participants/${removed}`)).fields
+    check(pu.group_id?.stringValue === undefined, '(O9) removed participant group_id cleared')
+    check(pu.is_lead?.booleanValue === false, '(O9) removed participant is_lead cleared')
+
+    // group stays standing with an empty seat → refill with a bot → playable (opens a round)
+    const tf = await topUpFn(gid, grp.group_id)
+    check(tf.ok && tf.result.added === 1, '(O9) empty seat refills with a bot (2 humans + 1 bot)')
+    const o = await openG(gid, grp.group_id, 1)
+    check(o.ok && o.result.ok, '(O9) group opens a round after refill (playable again)')
+
+    // locked-group rejection (stamp a lock to simulate a played group)
+    const lg = 'o2-ungroup-lock'
+    await fsWrite(lg, 'config/main', { clock_mode: 'off' })
+    for (let i = 0; i < 3; i++) await seedOnline(lg, `v${i}`, `V ${i}`, `v${i}@ex.edu`)
+    await groupOnline(lg)
+    const lgrp = (await onlineGroups(lg)).groups[0]
+    await fsWrite(lg, `groups/${lgrp.group_id}`, { seats_locked_at: '2026-01-01T00:00:00Z' })
+    const rr = await moveSeatFn(lg, lgrp.members[0].participant_id, '')
+    check(!rr.ok && /lock/i.test(rr.error || ''), '(O9) ungroup rejected on a locked group')
+  }
+
+  // (O10) BID BOUNDS (§O2.2) — integer 10..30 inclusive; server rejects out-of-range humans
+  banner('(O10) bid bounds — integer between 10 and 30 (inclusive)')
+  {
+    const gid = 'bid-bounds'; await seedGroup(gid, PIDS); await open(gid, 1)
+    const rm = await roleMap(gid)
+    const b9 = await bid(gid, rm.seller1, 9)
+    check(!b9.result.ok && /between 10 and 30/i.test(b9.result.reason || ''), '(O10) bid 9 rejected (below the cost floor)')
+    const b31 = await bid(gid, rm.seller1, 31)
+    check(!b31.result.ok && /between 10 and 30/i.test(b31.result.reason || ''), '(O10) bid 31 rejected (above the value ceiling)')
+    const bFrac = await bid(gid, rm.seller1, 15.5)
+    check(!bFrac.result.ok, '(O10) non-integer bid rejected')
+    const b10 = await bid(gid, rm.seller1, 10)
+    check(b10.result.ok, '(O10) bid 10 accepted (cost floor, inclusive)')
+    const b30 = await bid(gid, rm.seller2, 30)
+    check(b30.result.ok, '(O10) bid 30 accepted (value ceiling, inclusive)')
+  }
+
   console.log('\n' + '═'.repeat(72))
   console.log(`  RESULT: ${PASS} passed, ${FAIL} failed`)
   console.log('═'.repeat(72))

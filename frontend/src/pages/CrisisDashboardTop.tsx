@@ -199,8 +199,15 @@ function StripActions({
   const emptySeats = 3 - live.player_participants.length
   const otherDests = destinations.filter(d => d.id !== g.groupId)
 
-  const doMove = async (dest: string) => {
-    if (!member || !dest) return
+  // Destination handler: a real group id moves the member; the special "__remove__" value ungroups
+  // them (moveSeat with an empty target — the seat becomes empty). Remove is confirmed first.
+  const doDest = async (dest: string) => {
+    if (!member) return
+    if (dest === '__remove__') {
+      const name = live?.members.find(m => m.participant_id === member)?.display_name ?? 'this student'
+      if (!window.confirm(`Remove ${name} from Group ${g.groupNumber}? Their seat becomes empty.`)) return
+      setBusy(true); await onMove(member, ''); setMember(''); setBusy(false); return // '' target = ungroup
+    }
     setBusy(true); await onMove(member, dest); setMember(''); setBusy(false)
   }
   const doFill = async () => { setBusy(true); await onFill(); setBusy(false) }
@@ -225,9 +232,12 @@ function StripActions({
             <option value="">Move member…</option>
             {live.members.map(m => <option key={m.participant_id} value={m.participant_id}>{m.display_name}</option>)}
           </select>
-          <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member || noDest} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doMove(d) }} style={{ fontSize: typography.sizeXs }}>
-            <option value="">{noDest ? 'to group… (none has a free seat)' : 'to group…'}</option>
+          {/* Enabled whenever a member is picked — "Remove from group" is always available even
+              when no group has a free seat (the full-class case). */}
+          <select data-testid={`crisis-strip-move-dest-${g.groupNumber}`} value="" disabled={busy || !member} onChange={e => { const d = e.target.value; e.currentTarget.value = ''; void doDest(d) }} style={{ fontSize: typography.sizeXs }}>
+            <option value="" disabled>{noDest ? 'move to… (no group has a free seat)' : 'move to…'}</option>
             {otherDests.map(d => <option key={d.id} value={d.id}>Group {d.n}</option>)}
+            <option data-testid={`crisis-strip-remove-${g.groupNumber}`} value="__remove__">— Remove from group</option>
           </select>
         </>
       )}

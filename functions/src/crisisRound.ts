@@ -356,8 +356,16 @@ async function applyStudentAction(
 }
 
 // ── student action callables (the SAME names the Slice-3 UI will invoke) ──────────
+// Bid bounds (§1.1): an integer with 10 ≤ bid ≤ 30 — the seller's cost (10) is the floor and
+// the buyer's per-unit value (30) is the ceiling; INCLUSIVE (a bid at cost or at value is legal,
+// just zero-margin / zero-buyer-surplus). Validated here on the HUMAN path; the default table
+// (timeout/bot draws) already produces in-range integers ([12,17] low, [22,27] high) and is
+// unchanged. The machine additionally rejects non-integer/negative (machine.ts) as defence.
 export const submitBid = onCall(CORS, async (request) => {
   const bid = Number((request.data as Record<string, unknown>)['bid'])
+  if (!Number.isInteger(bid) || bid < 10 || bid > 30) {
+    return { ok: false as const, reason: 'Enter a whole number between 10 and 30 (your cost is 10, the buyer values each unit at 30).' }
+  }
   return applyStudentAction(request, () => ({ kind: 'bid', bid }))
 })
 
