@@ -170,9 +170,9 @@ async function main() {
     const finPresent = await Promise.all(pages.map(p => testidPresent(p.page, 'crisis-finished')))
     check(finPresent.every(Boolean), '(1) every seat shows the finished screen')
     const hists = await Promise.all(pages.map(p => p.page.textContent('[data-testid="crisis-history"]')))
-    // §O2 6b: same DATA + layout for everyone; only the per-viewer "(you)" marker differs.
-    const norm = (h) => h.replace(/ \(you\)/g, '')
-    check(hists.every(h => norm(h) === norm(hists[0])), '(5) history DATA identical across all three seats (only the "(you)" marker differs)')
+    // §O2.1: same DATA + layout for everyone; only the per-viewer "You (…)" block label differs.
+    const norm = (h) => h.replace(/You \((Seller [12]|Buyer)\)/g, '$1')
+    check(hists.every(h => norm(h) === norm(hists[0])), '(5) history DATA identical across all three seats (only the "You (…)" block label differs)')
     const rowCounts = await Promise.all(pages.map(p => p.page.locator('[data-testid^="crisis-history-row-"]').count()))
     check(rowCounts.every(c => c === 10), '(1) history has 10 rows on every seat')
 
@@ -324,42 +324,35 @@ async function main() {
     for (const p of pages) await p.page.close()
   }
 
-  // (8) SAA-uniform: summary panel at TOP of the dashboard (link, not button); /live same-window
-  banner('(8) SAA-uniform live view — top summary panel + same-window /live')
+  // (8) O2.1 dashboard top (mode switch + group strip) + read-only /live
+  banner('(8) dashboard top area (mode switch + group strip) + read-only /live')
   {
     const gid = 'ui-live'; await seedGroup(gid, PIDS); await open(gid, 1)
-    // main dashboard: summary panel portaled to TOP; orange "Live view →" link; NO bottom button; panel not here
     const dash = await ctx.newPage()
     await dash.goto(`${FE}/dashboard?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
     await dash.waitForSelector('[data-testid="crisis-live-summary"]', { timeout: 30000 }).catch(() => {})
-    check(await testidPresent(dash, 'crisis-live-summary'), '(8) summary panel present at the top of the dashboard')
-    check(await testidPresent(dash, 'crisis-live-nav'), '(8) inline "Live view →" link present (not a button)')
-    check(!(await testidPresent(dash, 'crisis-open-live')), '(8) old bottom "Open live view" button removed')
+    check(await testidPresent(dash, 'crisis-mode-switch'), '(8) session-mode switch renders on the dashboard')
+    check(await testidPresent(dash, 'crisis-live-summary'), '(8) group strip renders on the dashboard')
+    check(await testidPresent(dash, 'crisis-live-nav'), '(8) inline "Live view →" link present')
     check(!(await testidPresent(dash, 'crisis-live-panel')), '(8) full live panel not on the main dashboard')
-    // the summary panel (inside its portal host) is the FIRST child of <main>, above the heading (like SAA)
-    const firstIsSummary = await dash.evaluate(() => {
+    check(!(await testidPresent(dash, 'crisis-online-panel')), '(8) the O2 cards panel is gone')
+    // the control-room top area (host) is the FIRST child of <main>, below the site header
+    const topFirst = await dash.evaluate(() => {
       const first = document.querySelector('main')?.firstElementChild
-      return !!first && first.querySelector('[data-testid="crisis-live-summary"]') !== null
+      return !!first && first.hasAttribute('data-crisis-top-host')
     })
-    check(firstIsSummary, '(8) summary panel is the first child of <main> (under buttons, above heading)')
+    check(topFirst, '(8) control-room top area is the first child of <main> (below the header)')
     await dash.close()
-    // /live (SAME window nav): back link + clock switch + panel
+
+    // /live: read-only mode (toggle moved to the dashboard), back link, live panel
     const live = await ctx.newPage()
     await live.goto(`${FE}/live?_dev_game_instance_id=${gid}&_session=tab`, { waitUntil: 'domcontentloaded' })
-    await live.waitForSelector('[data-testid="crisis-clock-switch"]', { timeout: 30000 }).catch(() => {})
-    check(await testidPresent(live, 'crisis-back-to-dashboard'), '(8) /live has an orange "← Back to dashboard" link')
-    check(await testidPresent(live, 'crisis-clock-switch'), '(8) /live has the clock switch')
-    await live.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 20000 }).catch(() => {})
+    await live.waitForSelector('[data-testid="crisis-live-panel"]', { timeout: 30000 }).catch(() => {})
+    check(await testidPresent(live, 'crisis-back-to-dashboard'), '(8) /live has "← Back to dashboard"')
     check(await testidPresent(live, 'crisis-live-panel'), '(8) /live renders the §4A live panel')
-
-    // (8b) the clock switch PERSISTS — click OFF then ON, confirm each sticks via getGameConfig
-    await live.click('[data-testid="clock-off"]'); await sleep(1200)
-    let cfg = (await callFn('getGameConfig', { _dev: { game_instance_id: gid } })).result
-    check(cfg.clock_mode === 'off', '(8b) clicking OFF persists (updateGameConfig accepted clock_mode)')
-    await live.click('[data-testid="clock-on"]'); await sleep(1200)
-    cfg = (await callFn('getGameConfig', { _dev: { game_instance_id: gid } })).result
-    check(cfg.clock_mode === 'on', '(8b) clicking ON persists — both stick')
-    check(!(await live.locator('text=No recognised fields to update').count()), '(8b) NO "No recognised fields to update" error')
+    await live.waitForSelector('[data-testid="crisis-mode-readout"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(live, 'crisis-mode-readout'), '(8) /live shows the session mode READ-ONLY')
+    check(!(await testidPresent(live, 'crisis-clock-switch')) && !(await testidPresent(live, 'clock-off')), '(8) /live no longer has the mode toggle (moved to dashboard)')
     await live.close()
   }
 
@@ -489,8 +482,8 @@ async function main() {
     await pk.close()
   }
 
-  // (11) O2 — single matching control per mode, live online panel, (you) history markers
-  banner('(11) O2 — one match control per mode + live online panel + (you) markers')
+  // (11) O2.1 — mode switch (+ guard), ONE match control per mode, strip actions, grouped header
+  banner('(11) O2.1 — mode switch, one match control, strip move/fill, grouped header')
   {
     const visibleControls = (page) => page.evaluate(() => {
       const vis = (el) => !!(el.offsetParent || el.getClientRects().length)
@@ -498,55 +491,89 @@ async function main() {
         .filter(b => /match now|group participants|re-group/i.test((b.textContent || '').trim()) && vis(b))
         .map(b => (b.textContent || '').trim())
     })
+    const modeDisabled = (page) => page.evaluate(() => {
+      const c = document.querySelector('[data-testid="crisis-mode-classroom"]')
+      const o = document.querySelector('[data-testid="crisis-mode-online"]')
+      return !!(c && c.disabled && o && o.disabled)
+    })
 
-    // (11a) classroom dashboard — exactly one control (shared "Match Now"), no online panel
-    const cg = 'ui-o2-on'
+    // (11a) classroom dashboard — mode switch present, exactly one control (shared "Match Now"), no cards
+    const cg = 'ui-o21-on'
     await fsWrite(cg, 'config/main', { clock_mode: 'on' })
     const dOn = await ctx.newPage()
     await dOn.goto(`${FE}/dashboard?_dev_game_instance_id=${cg}&_session=tab`, { waitUntil: 'domcontentloaded' })
-    await dOn.waitForSelector('[data-testid="crisis-live-summary"]', { timeout: 30000 }).catch(() => {})
+    await dOn.waitForSelector('[data-testid="crisis-mode-switch"]', { timeout: 30000 }).catch(() => {})
     await sleep(3500)
-    check(!(await testidPresent(dOn, 'crisis-online-panel')), '(11a) classroom: online panel NOT rendered')
+    check(await testidPresent(dOn, 'crisis-mode-switch'), '(11a) classroom: session-mode switch present')
+    check(!(await testidPresent(dOn, 'crisis-online-panel')), '(11a) classroom: no O2 cards panel (deleted)')
     const ctlOn = await visibleControls(dOn)
     check(ctlOn.length === 1 && /match now/i.test(ctlOn[0]), `(11a) classroom: exactly one match control [${ctlOn.join(' | ')}]`)
     await dOn.close()
 
-    // (11b) online dashboard — panel present; exactly one control; shared "Match Now" hidden
-    const og = 'ui-o2-off'
-    await fsWrite(og, 'config/main', { clock_mode: 'off' })
+    // (11b) mode switch WORKS + one control in ONLINE — click "Online" flips clock_mode, control becomes "Group…"
+    const og = 'ui-o21-off'
+    await fsWrite(og, 'config/main', { clock_mode: 'on' })
     for (let i = 0; i < 3; i++) await fsWrite(og, `participants/w${i}`, { participant_id: `w${i}`, game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: `Wanda ${i}`, email: `w${i}@ex.edu` })
-    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: og } })
     const dOff = await ctx.newPage()
     await dOff.goto(`${FE}/dashboard?_dev_game_instance_id=${og}&_session=tab`, { waitUntil: 'domcontentloaded' })
-    await dOff.waitForSelector('[data-testid="crisis-online-panel"]', { timeout: 30000 }).catch(() => {})
-    check(await testidPresent(dOff, 'crisis-online-panel'), '(11b) online: online panel renders in the dashboard body')
-    await sleep(1800) // MutationObserver hides the shared Match Now
+    await dOff.waitForSelector('[data-testid="crisis-mode-switch"]', { timeout: 30000 }).catch(() => {})
+    await sleep(3000)
+    await dOff.click('[data-testid="crisis-mode-online"]')
+    await sleep(1500)
+    check(((await callFn('getGameConfig', { _dev: { game_instance_id: og } })).result).clock_mode === 'off', '(11b) clicking "Online" flips the session mode (persisted)')
+    await sleep(3000) // OnlineMatchControl injects + hides Match Now
+    check(!(await testidPresent(dOff, 'crisis-online-panel')), '(11b) online: no O2 cards panel')
     const ctlOff = await visibleControls(dOff)
     check(ctlOff.length === 1 && /group|re-group/i.test(ctlOff[0]), `(11b) online: exactly one match control [${ctlOff.join(' | ')}]`)
     check(!ctlOff.some(t => /match now/i.test(t)), '(11b) online: shared "Match Now" is hidden')
-    check(await testidPresent(dOff, 'crisis-online-group-1'), '(11b) online: group 1 card renders')
-    check(!(await testidPresent(dOff, 'crisis-online-group-2')), '(11b) online: only one group so far')
 
-    // (11c) LIVE re-group without reload — add a 4th student + re-group via callable → 2 cards
+    // group via the single control → the strip fills (3 humans → group 1, full)
+    await dOff.click('[data-testid="crisis-match-control"]')
+    await dOff.waitForSelector('[data-testid="crisis-summary-row-1"]', { timeout: 12000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-summary-row-1'), '(11b) grouping via the single control fills the group strip')
+
+    // (11c) LIVE re-group without reload + strip actions (move, fill)
     await fsWrite(og, 'participants/w3', { participant_id: 'w3', game_instance_id: og, role: 'player', is_bot: false, prep_status: 'complete', name: 'Wanda 3', email: 'w3@ex.edu' })
-    await callFn('groupParticipantsOnline', { _dev: { game_instance_id: og } })
-    await dOff.waitForSelector('[data-testid="crisis-online-group-2"]', { timeout: 12000 }).catch(() => {})
-    check(await testidPresent(dOff, 'crisis-online-group-2'), '(11c) live onSnapshot: re-group to 2 groups reflected WITHOUT reload')
+    await dOff.click('[data-testid="crisis-match-control"]') // now labeled "Re-group participants"
+    await dOff.waitForSelector('[data-testid="crisis-summary-row-2"]', { timeout: 12000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-summary-row-2'), '(11c) live: re-group to 2 groups shown in the strip WITHOUT reload')
+    // 4 humans → [3,1]: group 2 short → it offers "fill seats with bots"
+    await dOff.waitForSelector('[data-testid="crisis-strip-fill-2"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-strip-fill-2'), '(11c) short group offers "fill empty seats with bots"')
+    // move a member from group 1 (3) into group 2 (1) → group 1 gains a free seat
+    await dOff.selectOption('[data-testid="crisis-strip-move-member-1"]', { index: 1 })
+    await dOff.selectOption('[data-testid="crisis-strip-move-dest-1"]', { label: 'Group 2' })
+    await dOff.waitForSelector('[data-testid="crisis-strip-fill-1"]', { timeout: 8000 }).catch(() => {})
+    check(await testidPresent(dOff, 'crisis-strip-fill-1'), '(11c) moving a member out (via the strip) frees a seat in group 1')
+    // fill group 1's freed seat with a bot → group full → its fill button disappears
+    await dOff.click('[data-testid="crisis-strip-fill-1"]')
+    await sleep(1800)
+    check(!(await testidPresent(dOff, 'crisis-strip-fill-1')), '(11c) after bot-fill the fill button disappears (group full)')
     await dOff.close()
 
-    // (11d) "(you)" markers land on the viewer's OWN history columns, for each of the 3 roles
-    const yg = 'ui-o2-you'; await seedGroup(yg); await open(yg, 1)
+    // (11d) mode switch GUARDED once a group has started
+    const mg = 'ui-o21-guard'; await seedGroup(mg); await open(mg, 1)
+    const dG = await ctx.newPage()
+    await dG.goto(`${FE}/dashboard?_dev_game_instance_id=${mg}&_session=tab`, { waitUntil: 'domcontentloaded' })
+    await dG.waitForSelector('[data-testid="crisis-mode-switch"]', { timeout: 30000 }).catch(() => {})
+    await sleep(3500)
+    check(await modeDisabled(dG), '(11d) mode switch DISABLED once a group has started')
+    await dG.close()
+
+    // (11e) grouped header — the viewer's own role block reads "You (…)", others plain, no "(you)"
+    const yg = 'ui-o21-you'; await seedGroup(yg); await open(yg, 1)
     const pagesById = {}; for (const pid of PIDS) pagesById[pid] = await gotoSeat(ctx, yg, pid)
     const arr = PIDS.map(pid => ({ pid, page: pagesById[pid] }))
     await driveToFinish(arr, { bid: () => 15, alloc: () => [50, 50], fix: () => true })
-    const wantCol = { seller1: 'Bid 1 (you)', seller2: 'Bid 2 (you)', buyer: "Buyer's Profit (you)" }
-    const notCol  = { seller1: 'Bid 2 (you)', seller2: 'Bid 1 (you)', buyer: 'Bid 1 (you)' }
+    const wantBlock  = { seller1: 'You (Seller 1)', seller2: 'You (Seller 2)', buyer: 'You (Buyer)' }
+    const otherBlock = { seller1: 'You (Seller 2)', seller2: 'You (Seller 1)', buyer: 'You (Seller 1)' }
     for (const pid of PIDS) {
       const page = pagesById[pid]
       const role = (await stateOf(page)).role
       const hdr = await page.textContent('[data-testid="crisis-history"]')
-      check(hdr.includes(wantCol[role]), `(11d) ${role}: own column marked "${wantCol[role]}"`)
-      check(!hdr.includes(notCol[role]), `(11d) ${role}: another role's column NOT marked "(you)"`)
+      check(hdr.includes(wantBlock[role]), `(11e) ${role}: own block labeled "${wantBlock[role]}"`)
+      check(!hdr.includes(otherBlock[role]), `(11e) ${role}: another role's block NOT labeled "You (…)"`)
+      check(!hdr.includes('(you)'), `(11e) ${role}: no "(you)" suffixes remain`)
     }
     for (const pid of PIDS) await pagesById[pid].close()
   }

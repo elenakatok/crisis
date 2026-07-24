@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { signInWithCustomToken, setPersistence, browserSessionPersistence } from 'firebase/auth'
 import { GameHeader, colors, typography, layout, spacing } from '@mygames/game-ui'
 import { auth } from '../firebase'
-import { getInstructorSession } from '../api'
-import ClockSwitch from './ClockSwitch'
+import { getInstructorSession, getGameConfig } from '../api'
 import CrisisLivePanel from './CrisisLivePanel'
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -43,6 +42,20 @@ function useInstructorAuth() {
   return { ready, error }
 }
 
+// /live shows the session mode READ-ONLY (the switch lives on the dashboard — one control,
+// one place). §O2.1 step 1.
+function ModeReadout() {
+  const [mode, setMode] = useState<'on' | 'off'>('on') // default classroom until the config loads
+  useEffect(() => { getGameConfig().then(c => setMode(c.clock_mode === 'off' ? 'off' : 'on')).catch(() => {}) }, [])
+  return (
+    <div data-testid="crisis-mode-readout" style={{ display: 'flex', alignItems: 'center', gap: spacing.gapSm, margin: `${spacing.gapMd} 0`, color: colors.textSecondary, fontSize: '0.9rem' }}>
+      <span style={{ fontWeight: 600, color: colors.text }}>Session mode:</span>
+      {mode === 'on' ? 'Classroom — round clock' : 'Online — no clock'}
+      <span style={{ color: colors.textFaint }}>· change it on the dashboard</span>
+    </div>
+  )
+}
+
 export default function LiveView() {
   const { ready, error } = useInstructorAuth()
 
@@ -60,7 +73,7 @@ export default function LiveView() {
         {!ready && !error && <p style={{ color: colors.textSecondary }}>Loading…</p>}
         {ready && (
           <>
-            <ClockSwitch />
+            <ModeReadout />
             <CrisisLivePanel />
           </>
         )}

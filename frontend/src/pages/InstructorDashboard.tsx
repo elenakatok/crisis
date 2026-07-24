@@ -3,8 +3,8 @@ import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, t
 import { auth, functions, rtdb } from '../firebase'
 import { submitInstructorOutcome } from '../api'
 import { crisisConfig } from '../gameConfig'
-import CrisisLiveSummary from './CrisisLiveSummary'
-import OnlineInstructorPanel from '../game/OnlineInstructorPanel'
+import CrisisDashboardTop from './CrisisDashboardTop'
+import OnlineMatchControl from './OnlineMatchControl'
 
 // ── Role labels from game config (SINGLE matching role — `player`) ─────────────
 
@@ -72,7 +72,12 @@ export default function InstructorDashboard() {
     <>
       {/* UNIFORM with SAA: a summary panel portals to the TOP of the shared <main> (under
           the buttons, above the heading) with an orange "Live view →" link, same window. */}
-      <CrisisLiveSummary />
+      {/* Control-room top area (portaled below the site header): the session-mode switch +
+          the single group strip (with inline online actions). Replaces CrisisLiveSummary. */}
+      <CrisisDashboardTop />
+      {/* The single matching control — injected into the toolbar at "Match Now"'s position;
+          online it replaces the DOM-hidden shared button. Renders nothing in classroom. */}
+      <OnlineMatchControl />
       <SharedDashboard
         title="Instructor Dashboard — Crisis"
         roleLabels={roleLabels}
@@ -85,9 +90,6 @@ export default function InstructorDashboard() {
         reportsRoute="/reports"
         scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
       />
-      {/* Online mode only (clock_mode='off') — the primary online view, in the dashboard body
-          BELOW the site header. Renders null in classroom mode; dashboard then unchanged. */}
-      <OnlineInstructorPanel />
     </>
   )
 }
