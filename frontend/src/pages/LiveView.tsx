@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { signInWithCustomToken, setPersistence, browserSessionPersistence } from 'firebase/auth'
+import { signInWithCustomToken, signOut, setPersistence, browserSessionPersistence } from 'firebase/auth'
 import { GameHeader, colors, typography, layout, spacing } from '@mygames/game-ui'
 import { auth } from '../firebase'
 import { getInstructorSession, getGameConfig } from '../api'
@@ -23,10 +23,25 @@ function useInstructorAuth() {
       const params = new URLSearchParams(window.location.search)
       const devGid = import.meta.env.DEV ? params.get('_dev_game_instance_id') : null
       const tokenParam = params.get('token')
+      // Production instance id — the dashboard's "Live view →" carries the whole query
+      // string forward, so /live receives token AND game_instance_id exactly as its
+      // sibling pages do.
+      const gidParam = params.get('game_instance_id')
       try {
         await auth.authStateReady()
-        const expected = devGid ? `instructor_${devGid}` : null
-        if (auth.currentUser && (!expected || auth.currentUser.uid === expected)) { if (!cancelled) setReady(true); return }
+        // ⚠ RESUME ONLY ON A MATCHING INSTRUCTOR SESSION — the guard used to read the
+        // instance id from the DEV param alone, so in production `expected` was null and
+        // the condition `!expected || uid === expected` resumed on ANY signed-in user.
+        // A student session in the same browser would make /live believe it was
+        // authenticated, and its instructor callables then failed with permission-denied
+        // instead of cleanly re-authenticating. Now it matches Dashboard and Reports:
+        // resume only on instructor_<gid>, otherwise sign that user out and exchange.
+        if (auth.currentUser) {
+          const expected = devGid ? `instructor_${devGid}` : gidParam ? `instructor_${gidParam}` : null
+          if (expected && auth.currentUser.uid === expected) { if (!cancelled) setReady(true); return }
+          await signOut(auth)
+          if (cancelled) return
+        }
         const args = devGid ? { _dev: { game_instance_id: devGid } } : tokenParam ? { token: tokenParam } : null
         if (!args) { if (!cancelled) setError('No launch token found.'); return }
         const res = await getInstructorSession(args)

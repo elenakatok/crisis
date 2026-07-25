@@ -8,7 +8,8 @@
 //   node crisis-ui.mjs           (HEADED=1 to watch, KEEP=1 to leave the stack up)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { openSync } from 'node:fs'
+import { openSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { spawn, execSync } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import path from 'node:path'
@@ -72,6 +73,48 @@ function roleMapFrom(iv) { const m = {}; for (const s of iv.seats) m[s.role] = s
 const studentUrl = (gid, pid) => `${FE}/?_pid=${pid}&_gid=${gid}&_session=tab`
 const stateOf = (page) => page.evaluate(() => window.__crisisState ?? null)
 const testidPresent = (page, tid) => page.locator(`[data-testid="${tid}"]`).count().then(n => n > 0)
+
+// ── instructor-session guard helpers (§19) ──────────────────────────────────────
+// A real classroom JWT: getInstructorSession verifies against the baked-in classroom
+// PUBLIC key, which works identically in the emulator. The _dev bypass cannot exercise
+// the PRODUCTION guard, because with _dev set `expected` is non-null either way — and
+// it is precisely the production branch that was loose.
+const require_ = createRequire(import.meta.url)
+let signJwt = null
+try {
+  const jwtLib = require_(path.join(ROOT, 'functions', 'node_modules', 'jsonwebtoken'))
+  const key = readFileSync(path.resolve(ROOT, '../../classroom/scripts/game-jwt-private.pem'), 'utf8')
+  signJwt = (payload) => jwtLib.sign(payload, key, { algorithm: 'RS256', keyid: 'classroom-v1' })
+} catch { /* key/lib absent — §19 reports a skip rather than a false pass */ }
+
+function instructorToken(gid) {
+  const now = Math.floor(Date.now() / 1000)
+  return signJwt({
+    iss: 'classroom.mygames.live', sub: `prof-${gid}`, iat: now, exp: now + 900,
+    participant_id: `prof-${gid}`, name: 'Prof Harness', course_id: 'c1', session_id: 's1',
+    game_instance_id: gid, game_config_id: null, role: 'instructor',
+    classroom_callback_url: 'https://classroom.mygames.live/api/game-results',
+    callback_secret_id: 'crisis_v1',
+  })
+}
+
+/** The Firebase uid actually persisted for this origin (default persistence = IndexedDB). */
+const persistedUid = (page) => page.evaluate(() => new Promise((resolve) => {
+  let done = false
+  const finish = (v) => { if (!done) { done = true; resolve(v) } }
+  setTimeout(() => finish(null), 3000)
+  try {
+    const req = indexedDB.open('firebaseLocalStorageDb')
+    req.onerror = () => finish(null)
+    req.onsuccess = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains('firebaseLocalStorage')) return finish(null)
+      const all = db.transaction('firebaseLocalStorage', 'readonly').objectStore('firebaseLocalStorage').getAll()
+      all.onerror = () => finish(null)
+      all.onsuccess = () => finish((all.result ?? []).map(r => r?.value?.uid).filter(Boolean)[0] ?? null)
+    }
+  } catch { finish(null) }
+}))
 
 async function gotoSeat(ctx, gid, pid) {
   const page = await ctx.newPage()
@@ -1059,6 +1102,48 @@ async function main() {
       else if (iv.stage === 'fixing') played = (await callFn('submitFix', { ...base, fixed: true })).ok
     } else played = true // the late seat already acted / is a non-owing seat this stage
     check(played, '(18) the latecomer plays a round (their decision is accepted)')
+  }
+
+  // ── (19) /live instructor-session guard ───────────────────────────────────────
+  // /live used to compute the expected uid from the DEV param ALONE, so in production
+  // `expected` was null and `!expected || uid === expected` resumed on ANY signed-in
+  // user. A foreign session — a student's, or another instance's instructor — would be
+  // accepted, after which /live's instructor callables fail permission-denied instead
+  // of cleanly re-authenticating. It now reads game_instance_id like Dashboard and
+  // Reports do, so it resumes ONLY on instructor_<gid>.
+  banner('(19) /live resumes ONLY on a matching instructor session')
+  if (!signJwt) {
+    check(false, '(19) SKIPPED — classroom signing key not found; cannot mint a real token')
+  } else {
+    const gidA = `live-guard-a-${Date.now()}`
+    const gidB = `live-guard-b-${Date.now()}`
+    await seedGroup(gidA); await seedGroup(gidB)
+    const ctx = await browser.newContext()
+    const page = await ctx.newPage()
+
+    // Fresh instructor session for instance A — the normal load must still work.
+    await page.goto(`${FE}/live?token=${instructorToken(gidA)}&game_instance_id=${gidA}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('[data-testid="crisis-mode-readout"], [data-testid="crisis-back-to-dashboard"]', { timeout: 45000 })
+    await page.waitForFunction(() => !/Loading…/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {})
+    const uidA = await persistedUid(page)
+    check(uidA === `instructor_${gidA}`, `(19) a FRESH instructor session still loads /live [uid=${uidA}]`)
+    check(!(await page.locator('body').innerText()).includes('Could not authenticate'), '(19) …with no auth error')
+
+    // ⚠ THE GUARD: same browser, now open /live for a DIFFERENT instance. Instance A's
+    // instructor is signed in. The loose guard resumed on it — leaving /live showing
+    // instance B while authenticated as instance A. It must sign out and re-exchange.
+    await page.goto(`${FE}/live?token=${instructorToken(gidB)}&game_instance_id=${gidB}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('[data-testid="crisis-mode-readout"], [data-testid="crisis-back-to-dashboard"]', { timeout: 45000 })
+    await page.waitForFunction(() => !/Loading…/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {})
+    const uidB = await persistedUid(page)
+    check(uidB === `instructor_${gidB}`, `(19) a FOREIGN session is NOT resumed — re-exchanged for this instance [uid=${uidB}]`)
+    check(uidB !== `instructor_${gidA}`, '(19) …and specifically is no longer instance A\'s instructor')
+
+    // Same instance again → resumes, no pointless re-exchange.
+    await page.goto(`${FE}/live?token=${instructorToken(gidB)}&game_instance_id=${gidB}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('[data-testid="crisis-mode-readout"], [data-testid="crisis-back-to-dashboard"]', { timeout: 45000 })
+    check(await persistedUid(page) === `instructor_${gidB}`, '(19) reloading the SAME instance keeps the matching session')
+    await ctx.close()
   }
 
   await browser.close()
