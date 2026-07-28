@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { httpsCallable } from 'firebase/functions'
 import { signInWithCustomToken, signOut } from 'firebase/auth'
 import { auth, functions } from '../firebase'
-import { GameHeader, ReportBoard, type ReportTileConfig } from '@mygames/game-ui'
+import { GameHeader, ReportBoard, RosterReport, type ReportTileConfig, type SortableColumn } from '@mygames/game-ui'
 import { getCrisisReport, getOnlineReport, type CrisisReport, type ReportStudentRow, type OnlineReport, type OnlineReportStudent } from '../api'
 import AllocationsChart from './AllocationsChart'
 
@@ -47,52 +47,92 @@ function Figure({ label, value, note }: { label: string; value: string; note?: s
   )
 }
 
-// ── Sortable per-student table (Report 3) ───────────────────────────────────────────
+// ── Tier 1a per-student roster (Report 3) — the SHARED widget ──────────────────────
+// Migrated to @mygames/game-ui's RosterReport in Slice 5a. The hand-rolled sort (a
+// useMemo comparator plus click-to-toggle headers) is gone; SortableTable supplies it,
+// along with nulls-last handling this table used to do by hand.
+//
+// ⚠ PARITY. Every visible detail is preserved through the widget's Slice-5a props:
+// the test ids the harness reads (`crisis-student-table`, `student-row-<pid>`), the
+// header/cell density, Crisis's own `· bots` marker rather than the shared BOT badge,
+// and no shared legend (Crisis has its own footnote below the table).
 type SortKey = 'name' | 'groupNumber' | 'role' | 'averageBid' | 'proportionFixed' | 'averageAllocation' | 'timeouts' | 'profit'
+
+/** Crisis's report row, in the shape RosterReport requires. */
+type RosterRow = ReportStudentRow & { rawScore: number | null }
+
+const CRISIS_TH: React.CSSProperties = {
+  textAlign: 'left', padding: '0.4rem 0.7rem', borderBottom: '2px solid #ddd',
+  fontSize: '0.8rem', fontWeight: 600, whiteSpace: 'nowrap', background: '#faf7f2',
+}
+const CRISIS_TD: React.CSSProperties = {
+  padding: '0.4rem 0.7rem', borderBottom: '1px solid #eee',
+  fontSize: '0.85rem', fontVariantNumeric: 'tabular-nums',
+}
+
+/** Ascending comparator with nulls last, matching the previous hand-rolled sort. */
+const byNum = (get: (r: RosterRow) => number | null) => (a: RosterRow, b: RosterRow) =>
+  (get(a) ?? 0) - (get(b) ?? 0)
+const nullish = (get: (r: RosterRow) => number | null) => (r: RosterRow) => get(r) === null
+
 function StudentTable({ rows }: { rows: ReportStudentRow[] }) {
-  const [key, setKey] = useState<SortKey>('groupNumber')
-  const [dir, setDir] = useState<1 | -1>(1)
-  const sorted = useMemo(() => {
-    const cmp = (a: ReportStudentRow, b: ReportStudentRow) => {
-      const av = a[key], bv = b[key]
-      if (av === null) return 1
-      if (bv === null) return -1
-      const r = typeof av === 'string' ? String(av).localeCompare(String(bv)) : (av as number) - (bv as number)
-      return r !== 0 ? r * dir : a.name.localeCompare(b.name)
-    }
-    return [...rows].sort(cmp)
-  }, [rows, key, dir])
-  const head = (k: SortKey, label: string) => (
-    <th style={{ ...th, cursor: 'pointer' }} data-testid={`col-${k}`} onClick={() => { if (k === key) setDir(d => (d === 1 ? -1 : 1)); else { setKey(k); setDir(1) } }}>
-      {label}{k === key ? (dir === 1 ? ' ▲' : ' ▼') : ''}
-    </th>
-  )
+  const roster: RosterRow[] = rows.map(r => ({ ...r, rawScore: null }))
+
+  const columns: SortableColumn<RosterRow, SortKey>[] = [
+    {
+      key: 'name', label: 'Name', headerStyle: CRISIS_TH,
+      compare: (a, b) => a.name.localeCompare(b.name),
+      render: r => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          {r.name}
+          {/* Crisis's own marker, deliberately NOT the shared BOT badge — that is
+              instructor-visible copy and changing it would not be parity. */}
+          {r.botGroup && (
+            <span title="Played in a bot-filled group — the other seats were bots"
+              style={{ marginLeft: 5, fontSize: '0.68rem', fontWeight: 600, color: '#b45309' }}>· bots</span>
+          )}
+        </span>
+      ),
+    },
+    { key: 'groupNumber', label: 'Group', headerStyle: CRISIS_TH, compare: (a, b) => a.groupNumber - b.groupNumber, render: r => r.groupNumber },
+    { key: 'role', label: 'Role', headerStyle: CRISIS_TH, compare: (a, b) => a.role.localeCompare(b.role), render: r => <span style={{ whiteSpace: 'nowrap' }}>{r.role}</span> },
+    {
+      key: 'averageBid', label: 'Average bid', headerStyle: CRISIS_TH,
+      compare: byNum(r => r.averageBid), render: r => <>{one(r.averageBid)}{r.role === 'Buyer' ? ' *' : ''}</>,
+    },
+    {
+      key: 'proportionFixed', label: 'Proportion fixed', headerStyle: CRISIS_TH,
+      compare: byNum(r => r.proportionFixed), nullsLast: true, isNull: nullish(r => r.proportionFixed),
+      render: r => pct(r.proportionFixed),
+    },
+    {
+      key: 'averageAllocation', label: 'Average allocation', headerStyle: CRISIS_TH,
+      compare: byNum(r => r.averageAllocation), nullsLast: true, isNull: nullish(r => r.averageAllocation),
+      render: r => (r.averageAllocation === null ? '—' : one(r.averageAllocation)),
+    },
+    {
+      key: 'timeouts', label: 'Stages missed', headerStyle: CRISIS_TH,
+      compare: byNum(r => r.timeouts),
+      render: r => <span style={{ color: r.timeouts > 0 ? '#b45309' : undefined, fontWeight: r.timeouts > 0 ? 600 : undefined }}>{r.timeouts}</span>,
+    },
+    { key: 'profit', label: 'Profit', headerStyle: CRISIS_TH, compare: byNum(r => r.profit), render: r => money(r.profit) },
+  ]
+
   return (
     <div style={{ overflowX: 'auto', border: '1px solid #ddd', borderRadius: 6 }}>
-      <table data-testid="crisis-student-table" style={{ borderCollapse: 'collapse', width: '100%' }}>
-        <thead><tr>
-          {head('name', 'Name')}{head('groupNumber', 'Group')}{head('role', 'Role')}
-          {head('averageBid', 'Average bid')}{head('proportionFixed', 'Proportion fixed')}
-          {head('averageAllocation', 'Average allocation')}{head('timeouts', 'Stages missed')}{head('profit', 'Profit')}
-        </tr></thead>
-        <tbody>
-          {sorted.map(r => (
-            <tr key={r.participantId} data-testid={`student-row-${r.participantId}`} data-bot-group={r.botGroup ? '1' : '0'}>
-              <td style={{ ...td, whiteSpace: 'nowrap' }}>
-                {r.name}
-                {r.botGroup && <span title="Played in a bot-filled group — the other seats were bots" style={{ marginLeft: 5, fontSize: '0.68rem', fontWeight: 600, color: '#b45309' }}>· bots</span>}
-              </td>
-              <td style={td}>{r.groupNumber}</td>
-              <td style={{ ...td, whiteSpace: 'nowrap' }}>{r.role}</td>
-              <td style={td}>{one(r.averageBid)}{r.role === 'Buyer' ? ' *' : ''}</td>
-              <td style={td}>{pct(r.proportionFixed)}</td>
-              <td style={td}>{r.averageAllocation === null ? '—' : one(r.averageAllocation)}</td>
-              <td style={{ ...td, color: r.timeouts > 0 ? '#b45309' : undefined, fontWeight: r.timeouts > 0 ? 600 : undefined }}>{r.timeouts}</td>
-              <td style={td}>{money(r.profit)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <RosterReport<RosterRow, SortKey>
+        rows={roster}
+        columns={columns}
+        initialSortKey="groupNumber"
+        // Crisis carries its own footnote below; the shared legend would be new copy.
+        showLegend={false}
+        testIds={{
+          root: 'crisis-student-table-root',
+          table: 'crisis-student-table',
+          row: r => `student-row-${r.participantId}`,
+        }}
+        cellStyles={{ header: CRISIS_TH, cell: CRISIS_TD }}
+      />
       <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '0.4rem 0.7rem' }}>
         * The Buyer&apos;s &ldquo;average bid&rdquo; is the allocation-weighted average price they paid.
         {rows.some(r => r.timeouts > 0) && <> · <span style={{ color: '#b45309' }}>Timeouts</span> = stages the seat missed; those decisions were filled by default, so a &ldquo;proportion fixed&rdquo; with many timeouts is an artifact, not a strategy.</>}

@@ -466,7 +466,16 @@ async function main() {
     await rp.click('text=Per-student')
     await rp.waitForSelector('[data-testid="crisis-student-table"]', { timeout: 8000 }).catch(() => {})
     check(await rp.locator('[data-testid^="student-row-"]').count() === 6, '(9) per-student table has all 6 humans (2 groups × 3)')
-    check(!(await rp.locator('[data-testid^="student-row-"]').evaluateAll(rows => rows.some(r => /bot/i.test(r.textContent ?? '')))), '(9) no bot rows in the per-student table')
+    // STRUCTURAL, not a text match. This used to be /bot/i over each row's text,
+    // which conflates "a bot is listed as a student" (the real invariant) with "the
+    // word bot appears" — so Crisis's own "· bots" marker on a HUMAN who played in a
+    // bot-filled group would have failed it, and any copy change could too. The
+    // invariant is about identity: a bot participant id is `bot_<group>_<n>`
+    // (makeBotSeat), and none may appear as a row.
+    const rowIds = await rp.locator('[data-testid^="student-row-"]')
+      .evaluateAll(rows => rows.map(r => (r.getAttribute('data-testid') ?? '').replace('student-row-', '')))
+    check(rowIds.length > 0 && rowIds.every(id => !/^bot_/.test(id)),
+      '(9) no bot PARTICIPANT is listed as a student row (structural, by id)')
     await rp.close()
   }
 
