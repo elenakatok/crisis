@@ -1595,6 +1595,52 @@ async function main() {
       const v = (await sview(gid, rm[role])).result
       check(v.history[0].crisisOccurred === true, `(L) history / ${role}: round 1 is public`)
     }
+
+    // ── THE HISTORY TABLE, on the wire (§3.5.2) ──
+    // game-ui does not depend on stage-engine at runtime, so a game that hands the
+    // widget unfiltered rows gets them faithfully rendered. Crisis discharges the
+    // contract server-side — history is built through the engine's buildSeatView —
+    // and that is asserted here rather than trusted.
+    //
+    // Round 2 is now OPEN, so its crisis has been drawn and is hidden again. The
+    // history array must carry no trace of it.
+    {
+      const PUBLIC_ROW_KEYS = [
+        'round', 'buyerSeat', 'seller1Seat', 'seller2Seat',
+        'bids', 'allocation', 'crisisOccurred', 'fixed', 'profits', 'defaulted',
+      ]
+      for (const role of ['buyer', 'seller1', 'seller2']) {
+        const v = (await sview(gid, rm[role])).result
+        check(v.round === 2, `(L) history / ${role}: round 2 is in flight`)
+
+        // 1. The IN-FLIGHT round is absent from history entirely — the strongest
+        //    form of the guarantee: nothing to filter and no key to leak.
+        check(!v.history.some(h => h.round === v.round),
+          `(L) history / ${role}: the in-flight round has NO row`)
+        check(v.history.length === 1,
+          `(L) history / ${role}: only the resolved round is present`)
+
+        // 2. No row carries a key outside the public record shape — so the engine's
+        //    UNDECLARED bookkeeping (prior_fix_1/2) cannot ride along.
+        for (const h of v.history) {
+          const extra = Object.keys(h).filter(k => !PUBLIC_ROW_KEYS.includes(k))
+          check(extra.length === 0,
+            `(L) history / ${role}: row ${h.round} carries no extra keys (${extra.join(',') || 'none'})`)
+          check(!('prior_fix_1' in h) && !('prior_fix_2' in h),
+            `(L) history / ${role}: row ${h.round} carries no server-side bookkeeping`)
+          check(!('roundFields' in h) && !('submissions' in h),
+            `(L) history / ${role}: row ${h.round} exposes no engine internals`)
+        }
+
+        // 3. Absence, not a blank: the whole serialised history mentions neither the
+        //    engine's field names nor the undeclared bookkeeping.
+        const wire = JSON.stringify(v.history)
+        check(!wire.includes('crisis_occurred'),
+          `(L) history / ${role}: the engine's field name appears nowhere`)
+        check(!wire.includes('prior_fix'),
+          `(L) history / ${role}: the prior-fix bookkeeping appears nowhere`)
+      }
+    }
   }
 
   banner('(O21) instructor-email — syncRoster stores the synced email; absent-owner degrades')
