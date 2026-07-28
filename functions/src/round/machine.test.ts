@@ -163,7 +163,16 @@ describe('timeout → default (§3.2), each stage independently', () => {
     s = expireStage(s, S).state                                   // bidding defaults (types drawn)
     s = applyAction(s, s.buyerSeat, { kind: 'allocation', a1: 50, a2: 50 }, S).state
     expect(s.stage).toBe('fixing')
-    const beforeTypes = { ...s.roundType }
+    // The migration dropped the stored `roundType`: the HIGH default bid range
+    // [22,27] and LOW [12,17] sit strictly either side of fixBidThreshold 20, so the
+    // BID identifies the type exactly (proved exhaustively in spec.test.ts). The
+    // assertion below is unchanged — "a default-bid seller fixes per its TYPE" — only
+    // the way the type is read has moved from a stored field to the bid it produced.
+    const typeOf = (bid: number) => (bid >= S.highBid.min && bid <= S.highBid.max ? 'high' : 'low')
+    const beforeTypes = {
+      [s.seller1Seat]: typeOf(s.bids[s.seller1Seat]),
+      [s.seller2Seat]: typeOf(s.bids[s.seller2Seat]),
+    }
     s = expireStage(s, S).state                                   // fixing defaults
     // the recorded fix must equal the TYPE's fix (high→fix, low→not)
     const rec = s.history[0]

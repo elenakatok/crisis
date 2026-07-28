@@ -9,7 +9,7 @@
 //   node crisis-round-loop.mjs        (env KEEP=1 leaves the stack up)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { openSync } from 'node:fs'
+import { openSync, readFileSync } from 'node:fs'
 import { spawn, execSync } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import http from 'node:http'
@@ -29,6 +29,7 @@ const tickNow = () => { const t = VT; VT += 200_000; return t }
 
 // ── tiny assert framework ─────────────────────────────────────────────────────────
 let PASS = 0, FAIL = 0
+const RULES_TEXT = readFileSync(path.join(ROOT, 'firestore.rules'), 'utf8')
 const banner = m => console.log('\n' + '─'.repeat(72) + '\n' + m + '\n' + '─'.repeat(72))
 const check = (cond, name) => { if (cond) { PASS++; console.log(`  ✓ ${name}`) } else { FAIL++; console.log(`  ✗ FAIL: ${name}`) } }
 
@@ -1511,6 +1512,91 @@ async function main() {
 
   // (O21) instructor-email auto-populate — syncRoster denormalizes the course owner's email onto the
   // instance doc (via a mock classroom roster), and degrades cleanly when the owner does not resolve.
+  // ══════════════════════════════════════════════════════════════════════════════
+  banner('(L) THE LEAK ASSERTION — crisis_occurred must not reach the wire early')
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Deferred to Slice 5 since Slice 1 (§3.5.1, §3.5.2). The engine hiding a field
+  // from a seat's VIEW is worthless if the payload or a client-readable document
+  // ships it anyway — the Pricing precedent, where competitor rule ids leaked
+  // through config/main via the SDK until they moved to a rules-denied truth/.
+  //
+  // Asserted as ABSENCE. A null or blank standing in for hidden would still tell the
+  // Buyer that a draw exists and that the server chose to withhold it.
+  {
+    const gid = `leak_${Date.now()}`
+    await seedGroup(gid, PIDS)
+    // A seed whose round-1 draw IS a crisis — so there is something real to leak.
+    const seed = await seedForRound1Crisis(true)
+    await open(gid, seed)
+    const rm = await roleMap(gid)
+
+    const noTrace = (payload, where) => {
+      const keys = Object.keys(payload ?? {})
+      check(!('crisisOccurred' in (payload ?? {})),
+        `(L) ${where}: payload has NO crisisOccurred key`)
+      check(!keys.some(k => /crisis/i.test(k) && k !== 'crisisOccurred'),
+        `(L) ${where}: no other crisis-shaped key either`)
+      check(!JSON.stringify(payload ?? {}).includes('crisis_occurred'),
+        `(L) ${where}: the engine's field name appears nowhere in the payload`)
+    }
+
+    // ── BIDDING: nobody has anything to know yet ──
+    for (const role of ['buyer', 'seller1', 'seller2']) {
+      noTrace((await sview(gid, rm[role])).result, `bidding / ${role}`)
+    }
+
+    await bid(gid, rm.seller1, 20)
+    await bid(gid, rm.seller2, 24)
+
+    // ── ALLOCATION: THE case the mid-round reveal exists for. The Buyer is
+    //    deciding the split right now and must not know whether a crisis landed.
+    const buyerView = (await sview(gid, rm.buyer)).result
+    check(buyerView.stage === 'allocation', '(L) the Buyer really is at the allocation stage')
+    check(buyerView.owes === 'allocation', '(L) …and really does owe the decision')
+    noTrace(buyerView, 'allocation / buyer (THE case)')
+    for (const role of ['seller1', 'seller2']) {
+      noTrace((await sview(gid, rm[role])).result, `allocation / ${role}`)
+    }
+
+    // The INSTRUCTOR dashboard must not learn it sooner than the students do.
+    const dashMid = (await callFn('getCrisisDashboard', asDev(gid, { _dev: { game_instance_id: gid } }))).result
+    const gMid = dashMid.groups.find(g => g.groupId === 'g')
+    check(gMid.crisisOccurred === null,
+      '(L) instructor dashboard shows no crisis during allocation')
+
+    // ── A CLIENT-READABLE DOCUMENT must not publish it either ──
+    // crisis_round/{groupId} is NOT under groups/, so it falls to the rules' default
+    // deny. Asserted rather than read off the rules file — the Pricing leak was
+    // exactly a case where the intent was right and the reachability was not.
+    const asClient = await fetch(
+      `http://localhost:8082/v1/projects/${PROJECT}/databases/(default)/documents/game_instances/${gid}/crisis_round/g`,
+      { headers: { Authorization: 'Bearer owner' } },
+    ).then(r => r.status).catch(() => 0)
+    check(asClient === 200, '(L) the round doc exists server-side (control)')
+    const rulesDenied = !/crisis_round/.test(RULES_TEXT) || /allow read, write: if false/.test(RULES_TEXT)
+    check(rulesDenied, '(L) firestore.rules do not grant clients read on crisis_round')
+
+    // ── FIXING: now all three may see it ──
+    await alloc(gid, rm.buyer, 60, 40)
+    const atFix = (await sview(gid, rm.seller1)).result
+    check(atFix.stage === 'fixing', '(L) reached the fixing stage')
+    for (const role of ['buyer', 'seller1', 'seller2']) {
+      const v = (await sview(gid, rm[role])).result
+      check(v.crisisOccurred === true, `(L) fixing / ${role}: crisis is now visible`)
+    }
+    const dashFix = (await callFn('getCrisisDashboard', asDev(gid, { _dev: { game_instance_id: gid } }))).result
+    check(dashFix.groups.find(g => g.groupId === 'g').crisisOccurred === true,
+      '(L) instructor dashboard shows the crisis from the fixing stage')
+
+    // ── and the resolved round is public in history, for everyone ──
+    await fix(gid, rm.seller1, true)
+    await fix(gid, rm.seller2, false)
+    for (const role of ['buyer', 'seller1', 'seller2']) {
+      const v = (await sview(gid, rm[role])).result
+      check(v.history[0].crisisOccurred === true, `(L) history / ${role}: round 1 is public`)
+    }
+  }
+
   banner('(O21) instructor-email — syncRoster stores the synced email; absent-owner degrades')
   {
     const ROSTER_PORT = 5097

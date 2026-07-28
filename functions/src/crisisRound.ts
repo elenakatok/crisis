@@ -28,6 +28,7 @@ import { crisisGameDef } from './gameDefinition'
 import { DEFAULT_CRISIS_SETTINGS } from './round/settings'
 import {
   openRoundState, applyAction, expireStage, buildSeatView, roleOfSeat, requiredSeats,
+  crisisVisible, assertCurrentShape,
   type CrisisState, type SeatAction,
 } from './round/machine'
 import {
@@ -86,6 +87,24 @@ interface StoredDoc {
   bot_seats?: number[]
   /** seat (string) → the bot Seller's FIXED type (§5.2 — drawn once at formation). */
   bot_type_by_seat?: Record<string, SellerType>
+}
+
+/**
+ * Read a stored round document, refusing a PRE-MIGRATION shape by name.
+ *
+ * The failure this prevents is silent: the old machine wrote `crisisOccurred: null`
+ * until the allocation stage closed, while the migrated loop draws at round open.
+ * Reading an old document through the new loop would resolve a round as "no crisis"
+ * that in fact had one — wrong payoffs, no error, nothing to notice.
+ *
+ * There is deliberately NO CONVERTER (Elena, Slice 5a): Crisis instances are
+ * single-use, so an old document cannot reach here. This is the cheap half of a
+ * converter without the dead code.
+ */
+function readStored(data: unknown): StoredDoc {
+  const stored = data as StoredDoc
+  assertCurrentShape(stored?.state)
+  return stored
 }
 
 /** A fresh stage deadline, or null when the clock is off. */
@@ -278,7 +297,7 @@ export async function applySeatAction(
   const outcome = await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref)
     if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
-    const stored = snap.data() as StoredDoc
+    const stored = readStored(snap.data())
     const seat = stored.seat_by_pid[participantId]
     if (seat === undefined) throw new HttpsError('permission-denied', 'You are not in this group.')
 
@@ -351,7 +370,7 @@ function buildBotAction(seat: number, state: CrisisState, botType: SellerType): 
 export async function runBotActions(iid: string, groupId: string) {
   const snap = await stateDoc(iid, groupId).get()
   if (!snap.exists) return { acted: 0, skipped: 0, status: 'not_found' as const }
-  const stored = snap.data() as StoredDoc
+  const stored = readStored(snap.data())
   const botSeats = stored.bot_seats ?? []
   if (stored.state.status !== 'in_progress' || botSeats.length === 0) {
     return { acted: 0, skipped: 0, status: stored.state.status }
@@ -433,7 +452,7 @@ async function tickClock(iid: string, groupId: string, clockNowMs: number) {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref)
     if (!snap.exists) return { ok: true as const, closed: false, reason: 'not_started' }
-    const stored = snap.data() as StoredDoc
+    const stored = readStored(snap.data())
     if (stored.state.status !== 'in_progress') return { ok: true as const, closed: false, reason: 'finished' }
     // Clock OFF (online play) → stages never time out; only real actions close them.
     if (!stored.clock_enabled || stored.stage_deadline_ms === null) return { ok: true as const, closed: false, reason: 'clock_off' }
@@ -453,7 +472,7 @@ async function tickClock(iid: string, groupId: string, clockNowMs: number) {
 async function backstopThenTick(iid: string, groupId: string, clockNowMs: number): Promise<void> {
   try {
     const snap = await stateDoc(iid, groupId).get()
-    if (snap.exists) await backstopBots(iid, groupId, snap.data() as StoredDoc, clockNowMs)
+    if (snap.exists) await backstopBots(iid, groupId, readStored(snap.data()), clockNowMs)
   } catch { /* another writer won */ }
   try { await tickClock(iid, groupId, clockNowMs) } catch { /* another writer won */ }
 }
@@ -490,7 +509,7 @@ export const getRoundView = onCall(CORS, async (request) => {
     snap = await stateDoc(gameInstanceId, groupId).get()
   }
   if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
-  const stored = snap.data() as StoredDoc
+  const stored = readStored(snap.data())
   const seat = stored.seat_by_pid[participantId]
   if (seat === undefined) throw new HttpsError('permission-denied', 'You are not in this group.')
 
@@ -512,7 +531,7 @@ export const getInstructorRoundView = onCall(CORS, async (request) => {
   await backstopThenTick(iid, groupId, nowMs(data))
   const snap = await stateDoc(iid, groupId).get()
   if (!snap.exists) throw new HttpsError('not-found', 'Round not started.')
-  const stored = snap.data() as StoredDoc
+  const stored = readStored(snap.data())
   const st = stored.state
   const seats = [0, 1, 2].map((seat) => ({
     seat,
@@ -556,7 +575,7 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
   // Resolve-on-read backstop: the dashboard polls ~2s, a reliable place to rescue an
   // overdue bot pass. Fire-and-await; the freshly-acted state surfaces on the next poll.
   const now = nowMs(data)
-  await Promise.all(roundsSnap.docs.map((r) => backstopBots(iid, r.id, r.data() as StoredDoc, now).catch(() => {})))
+  await Promise.all(roundsSnap.docs.map((r) => backstopBots(iid, r.id, readStored(r.data()), now).catch(() => {})))
 
   // participant → { name, isBot }
   const meta = new Map<string, { name: string; isBot: boolean }>()
@@ -580,7 +599,7 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
   for (const [pid, m] of meta) names[pid] = m.name
 
   const roundByGroup = new Map<string, StoredDoc>()
-  for (const r of roundsSnap.docs) roundByGroup.set(r.id, r.data() as StoredDoc)
+  for (const r of roundsSnap.docs) roundByGroup.set(r.id, readStored(r.data()))
 
   // Stable group numbers by sorted group_id (matches getReportData).
   const sortedGroupIds = groupsSnap.docs.map(g => g.id).sort((a, b) => a.localeCompare(b))
@@ -618,7 +637,13 @@ export const getCrisisDashboard = onCall(CORS, async (request) => {
       groupId: gid, groupNumber: groupNumber.get(gid) ?? null,
       status: st.status, startable: false,
       round: st.round, numRounds: st.numRounds, stage: st.stage,
-      crisisOccurred: st.crisisOccurred,
+      // PARITY: the crisis is now DRAWN at round open rather than when allocation
+      // closes, so the raw field is populated earlier than it used to be. The
+      // instructor dashboard must still learn it no sooner than the students do —
+      // "⚠ Crisis this round" while the Buyer is still allocating would leak the
+      // draw through the instructor's screen. crisisVisible applies the same reveal
+      // point the seat views use.
+      crisisOccurred: crisisVisible(st),
       clockEnabled: stored.clock_enabled,
       stageDeadlineMs: stored.clock_enabled ? stored.stage_deadline_ms : null,
       seats, waitingOn,
