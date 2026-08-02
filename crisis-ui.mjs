@@ -244,6 +244,19 @@ async function boxParity(page, round) {
 }
 /** A future clock reading to force the current stage's deadline to expire on demand. */
 const FUTURE_MS = 10_000_000_000_000
+/** Find a seed whose ROUND 2 is a crisis (round 1 played through first). */
+async function seedForRound2Crisis() {
+  for (let seed = 1; seed < 400; seed++) {
+    const gid = `probe2-${seed}`
+    const rm = await playRound1(gid, seed, { a1: 60, a2: 40 })
+    if ((await irv(gid)).round !== 2) continue
+    await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: 15 })
+    await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', bid: 15 })
+    await callFn('submitAllocation', { _test: { participant_id: rm.buyer, game_instance_id: gid }, group_id: 'g', a1: 60, a2: 40 })
+    if ((await irv(gid)).stage === 'fixing') return seed
+  }
+  throw new Error('no round-2 crisis seed')
+}
 
 // ── the suite ───────────────────────────────────────────────────────────────────
 async function main() {
@@ -1290,18 +1303,36 @@ async function main() {
       await bp.close()
     }
 
-    // ── (20e) gating: NO box on a MID-ROUND (allocation-stage) wait ──────────────
+    // ── (20e) box SHOWS on an ALLOCATION wait (a Seller waiting on the buyer) ─────
     {
-      const gid = 'box-midround'
+      const gid = 'box-alloc'
       const rm = await playRound1(gid, noCrisisSeed, { a1: 60, a2: 40 })  // round 2 now open (bidding)
-      // both sellers bid round 2 → stage advances to allocation; a Seller now waits mid-round
+      // both sellers bid round 2 → stage advances to allocation; the Sellers now wait on the buyer
       await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: 15 })
       await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', bid: 15 })
       check((await irv(gid)).stage === 'allocation', '(20e) round 2 reached the allocation stage')
       const sp = await gotoSeat(ctx, gid, rm.seller1)
-      await sp.waitForSelector('[data-testid="crisis-waiting"]', { timeout: 15000 }).catch(() => {})
-      check(!(await testidPresent(sp, 'crisis-round-summary')), '(20e) no box on a mid-round (allocation) wait')
+      await sp.waitForSelector('[data-testid="crisis-round-summary"]', { timeout: 15000 }).catch(() => {})
+      check(await testidPresent(sp, 'crisis-round-summary'), '(20e) box SHOWS on an allocation wait (Seller waiting on the buyer)')
+      check((await boxParity(sp, 1)).ok, '(20e) allocation-wait box figures match the table row-1')
       await sp.close()
+    }
+
+    // ── (20g) box is SUPPRESSED on a FIXING (crisis-decision) wait ───────────────
+    {
+      const r2CrisisSeed = await seedForRound2Crisis()
+      const gid = 'box-fixing'
+      const rm = await playRound1(gid, r2CrisisSeed, { a1: 60, a2: 40 })  // round 1 done → history[0] exists
+      await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: 15 })
+      await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', bid: 15 })
+      await callFn('submitAllocation', { _test: { participant_id: rm.buyer, game_instance_id: gid }, group_id: 'g', a1: 60, a2: 40 })
+      check((await irv(gid)).stage === 'fixing', '(20g) round 2 reached the fixing (crisis) stage')
+      // the buyer waits through fixing (never owes a fix) → crisis banner, but NO summary box
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-waiting"]', { timeout: 15000 }).catch(() => {})
+      check(!(await testidPresent(bp, 'crisis-round-summary')), '(20g) NO box on a fixing (crisis-decision) wait')
+      check(await testidPresent(bp, 'crisis-crisis-banner'), '(20g) the crisis banner shows on the fixing wait (as before)')
+      await bp.close()
     }
 
     // ── (20f) a DEFAULTED (timed-out) round renders correctly ────────────────────

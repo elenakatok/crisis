@@ -193,12 +193,14 @@ export default function CrisisGame({
 
   // ── WAITING (this seat has nothing to do right now) ──────────────────────────────
   const stageWord = view.stage === 'bidding' ? 'Sellers are setting their prices' : view.stage === 'allocation' ? 'the Buyer is allocating the units' : 'Sellers are deciding whether to fix the crisis'
-  // The between-rounds "round just completed" summary (Option B). A new round always
-  // opens at the bidding stage, so `stage === 'bidding'` with ≥1 resolved round is exactly
-  // the between-rounds wait — NOT a mid-round allocation/fixing wait, and NOT before round 1
-  // (no resolved round yet). The box renders the LAST resolved round record, which is the
-  // very same object the history table's last row reads — never recomputed.
-  const showSummary = view.stage === 'bidding' && view.history.length >= 1
+  // The "round just completed" summary (Option B). It reviews the LAST resolved round while a
+  // seat is idle, so EVERY player gets a look at each completed round: on the bidding wait
+  // (the buyer, or a seller who has already bid) AND the allocation wait (the two sellers
+  // waiting on the buyer). It is SUPPRESSED only on the FIXING wait — that is the active
+  // crisis-decision moment (its own ⚠ banner), not a moment to review the previous round.
+  // Gated on ≥1 resolved round, so it never appears before round 1. The record is the very
+  // same object the history table's last row reads — never recomputed.
+  const showSummary = view.stage !== 'fixing' && view.history.length >= 1
   const lastRound = view.history[view.history.length - 1]
   return (
     <main style={page}>
