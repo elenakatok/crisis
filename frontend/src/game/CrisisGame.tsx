@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { doc, onSnapshot } from 'firebase/firestore'
-import { colors, typography, layout, spacing } from '@mygames/game-ui'
+import { doc, onSnapshot, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore'
+import { colors, typography, layout, spacing, num, conditionalYesNo } from '@mygames/game-ui'
 import { db } from '../firebase'
 import {
-  getRoundView, submitBid, submitAllocation, submitFix, flagGroup,
-  type SeatView, type Role, type OnlineMember,
+  getRoundView, submitBid, submitAllocation, submitFix, flagGroup, getDebriefQuestions,
+  type SeatView, type Role, type OnlineMember, type RoundRecord,
 } from '../api'
 import { CRISIS, checkAllocation } from './constants'
 import HistoryTable from './HistoryTable'
@@ -106,19 +106,15 @@ export default function CrisisGame({
     </div>
   )
 
-  // ── FINISHED ───────────────────────────────────────────────────────────────────
+  // ── FINISHED (end screen — terminal results + optional debrief continuation) ─────
   if (view.status === 'finished') {
-    const myTotal = view.history.reduce((sum, h) =>
-      sum + (view.role === 'buyer' ? h.profits.buyer : view.role === 'seller1' ? h.profits.seller1 : h.profits.seller2), 0)
     return (
-      <main style={page} data-testid="crisis-finished">
-        <h1 style={{ marginTop: 0 }}>Game complete</h1>
-        <p>You played as <strong>{roleLabel}</strong>. Your total profit across all {view.numRounds} rounds
-          was <strong data-testid="crisis-total-profit">{myTotal.toLocaleString('en-US')}</strong>.</p>
-        <p style={{ color: colors.textSecondary }}>Profit is the object of the debrief — it is not graded.</p>
-        <h2 style={{ fontSize: '1.1rem' }}>Full history</h2>
-        <HistoryTable history={view.history} viewerRole={view.role} />
-      </main>
+      <FinishedScreen
+        view={view}
+        roleLabel={roleLabel}
+        participantId={participantId}
+        gameInstanceId={gameInstanceId}
+      />
     )
   }
 
@@ -197,6 +193,13 @@ export default function CrisisGame({
 
   // ── WAITING (this seat has nothing to do right now) ──────────────────────────────
   const stageWord = view.stage === 'bidding' ? 'Sellers are setting their prices' : view.stage === 'allocation' ? 'the Buyer is allocating the units' : 'Sellers are deciding whether to fix the crisis'
+  // The between-rounds "round just completed" summary (Option B). A new round always
+  // opens at the bidding stage, so `stage === 'bidding'` with ≥1 resolved round is exactly
+  // the between-rounds wait — NOT a mid-round allocation/fixing wait, and NOT before round 1
+  // (no resolved round yet). The box renders the LAST resolved round record, which is the
+  // very same object the history table's last row reads — never recomputed.
+  const showSummary = view.stage === 'bidding' && view.history.length >= 1
+  const lastRound = view.history[view.history.length - 1]
   return (
     <main style={page}>
       {header}
@@ -207,6 +210,7 @@ export default function CrisisGame({
       <p data-testid="crisis-waiting" style={{ color: colors.textSecondary }}>
         Right now {stageWord}. Waiting on <strong>{view.pendingCount}</strong> player{view.pendingCount === 1 ? '' : 's'}.
       </p>
+      {showSummary && <RoundSummaryBox record={lastRound} viewerRole={view.role} />}
       <HistorySection history={view.history} viewerRole={view.role} />
     </main>
   )
@@ -474,5 +478,282 @@ function HistorySection({ history, viewerRole }: { history: import('../api').Rou
       <h2 style={{ fontSize: '1.05rem' }}>History — everyone sees the same table</h2>
       <HistoryTable history={history} viewerRole={viewerRole} />
     </section>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PART 1 — the between-rounds "round just completed" summary box (Option B).
+//
+// ⚠ SOURCE OF TRUTH: this box reads the SAME resolved RoundRecord the history table's
+// last row reads (passed straight in — never recomputed). Every figure is rendered with
+// the SAME formatters the table uses (`num` for profit, `conditionalYesNo` for Fix?), so
+// the box and the last table row cannot disagree. A defaulted/timeout round carries its
+// substituted actions in that same record, so it renders here exactly as it does in the
+// table with no special case.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Plain-language crisis banner from `crisisOccurred` + the per-seat fix booleans.
+ *
+ * ⚠ Honesty about a 0-unit Seller: the resolver records `fixed.sX = false` for a Seller
+ * who was allocated 0 units (they had NO fix decision to make — see resolver.ts). The
+ * table shows that as "No" (its rule), but the SENTENCE must not imply they *declined*.
+ * So we branch on the allocation: a Seller with 0 units is described as "had no units",
+ * never as "did not fix". (Both Sellers cannot be 0 — the allocation always sums to the
+ * full contract, so at most one side is 0.)
+ */
+function crisisSentence(r: RoundRecord): string {
+  if (!r.crisisOccurred) return 'No crisis this round.'
+  const s1Units = r.allocation.a1 > 0
+  const s2Units = r.allocation.a2 > 0
+  const s1Fixed = r.fixed.s1 // true ⇒ crisis + had units + chose to fix
+  const s2Fixed = r.fixed.s2
+  if (!s1Units) {
+    return s2Fixed
+      ? 'A crisis hit — Seller 2 fixed it for their units; Seller 1 had no units this round.'
+      : 'A crisis hit — Seller 2 did not fix it; Seller 1 had no units this round.'
+  }
+  if (!s2Units) {
+    return s1Fixed
+      ? 'A crisis hit — Seller 1 fixed it for their units; Seller 2 had no units this round.'
+      : 'A crisis hit — Seller 1 did not fix it; Seller 2 had no units this round.'
+  }
+  if (s1Fixed && s2Fixed) return 'A crisis hit — both Sellers fixed it.'
+  if (!s1Fixed && !s2Fixed) return 'A crisis hit — neither Seller fixed it.'
+  const fixer = s1Fixed ? 'Seller 1' : 'Seller 2'
+  const other = s1Fixed ? 'Seller 2' : 'Seller 1'
+  return `A crisis hit — ${fixer} fixed it for their units; ${other} did not.`
+}
+
+function RoundSummaryBox({ record, viewerRole }: { record: RoundRecord; viewerRole: Role }) {
+  const boxStyle: React.CSSProperties = {
+    marginTop: spacing.gapLg, marginBottom: spacing.gapLg, padding: spacing.gapMd,
+    border: `1px solid ${colors.borderMid}`, borderRadius: 8, background: colors.white,
+  }
+  const bannerStyle: React.CSSProperties = {
+    margin: `0 0 ${spacing.gapMd}`, padding: `${spacing.gapSm} ${spacing.gapMd}`, borderRadius: 6,
+    fontWeight: 700,
+    background: record.crisisOccurred ? '#fff7ed' : '#f1f5f9',
+    color: record.crisisOccurred ? '#b45309' : colors.textStrong,
+  }
+  return (
+    <section data-testid="crisis-round-summary" style={boxStyle}>
+      <div style={{ fontWeight: 700, fontSize: '1.05rem', marginBottom: spacing.gapSm }}>
+        Round {record.round} — just completed
+      </div>
+      <p data-testid="crisis-summary-sentence" style={bannerStyle}>{crisisSentence(record)}</p>
+      <div style={{ display: 'flex', gap: spacing.gapMd, flexWrap: 'wrap' }}>
+        <PlayerCard record={record} role="seller1" label="Seller 1" mine={viewerRole === 'seller1'} />
+        <PlayerCard record={record} role="seller2" label="Seller 2" mine={viewerRole === 'seller2'} />
+        <PlayerCard record={record} role="buyer" label="Buyer" mine={viewerRole === 'buyer'} />
+      </div>
+    </section>
+  )
+}
+
+/** One seat's card. Sellers show Bid / Alloc / Fix? / Profit; the Buyer has only a Profit
+ *  (the same single figure the table's Buyer block shows). PROFIT is the emphasized figure.
+ *  The viewer's own card is highlighted, consistent with the table's "your block" shading. */
+function PlayerCard({ record, role, label, mine }: { record: RoundRecord; role: Role; label: string; mine: boolean }) {
+  const cardStyle: React.CSSProperties = {
+    flex: '1 1 8rem', minWidth: '8rem', padding: spacing.gapMd, borderRadius: 6,
+    border: `1px solid ${mine ? colors.text : colors.borderLight}`,
+    background: mine ? colors.confirmBg : colors.white,
+  }
+  const seller = role !== 'buyer'
+  const isS1 = role === 'seller1'
+  const bid = isS1 ? record.bids.s1 : record.bids.s2
+  const alloc = isS1 ? record.allocation.a1 : record.allocation.a2
+  const fix = conditionalYesNo(record.crisisOccurred, isS1 ? record.fixed.s1 : record.fixed.s2)
+  const profit = role === 'buyer' ? record.profits.buyer : isS1 ? record.profits.seller1 : record.profits.seller2
+  return (
+    <div data-testid={`crisis-summary-card-${role}`} style={cardStyle}>
+      <div style={{ fontWeight: 700, marginBottom: spacing.gapSm }}>
+        {label}{mine && <span style={{ color: colors.textSecondary, fontWeight: 400 }}> (you)</span>}
+      </div>
+      {seller && (
+        <div style={{ fontSize: '0.85rem', color: colors.textSecondary, lineHeight: 1.7 }}>
+          <div>Bid <strong data-testid={`crisis-summary-bid-${role}`} style={{ color: colors.text }}>{bid}</strong></div>
+          <div>Allocation <strong data-testid={`crisis-summary-alloc-${role}`} style={{ color: colors.text }}>{alloc}</strong></div>
+          <div>Fix? <strong data-testid={`crisis-summary-fix-${role}`} style={{ color: colors.text }}>{fix}</strong></div>
+        </div>
+      )}
+      <div style={{ marginTop: spacing.gapSm }}>
+        <div style={{ fontSize: '0.75rem', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Profit</div>
+        <div data-testid={`crisis-summary-profit-${role}`} style={{ fontSize: '1.5rem', fontWeight: 800 }}>{num(profit)}</div>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PART 2 — the end screen: terminal results + config-driven debrief continuation.
+//
+// FRONTEND-ONLY (audit A4): the debrief SUBMISSION is a direct client write to the
+// student's own participant doc (`debrief_submitted_at` + each answer field) — the exact
+// path the shared Results component uses. Crisis's firestore.rules already permit a
+// student to update their own participant doc for any non-protected field (debrief_* is
+// not blocklisted), so no callable and no rules change are needed. `getDebriefQuestions`
+// already exists and is wired.
+//
+// The presence of a configured debrief question IS the switch:
+//   • configured (non-empty) → "Game complete" gets a Continue → debrief screen → submit
+//     → terminal results state.
+//   • empty (the current live config) → "Game complete" IS terminal, with the closure line.
+// Both paths end on the SAME terminal results view (history + total + closure, no forward
+// control). Resume-safe via `debrief_submitted_at`.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type DebriefQuestion = { field: string; prompt: string; type?: string; placeholder?: string }
+
+function FinishedScreen({
+  view, roleLabel, participantId, gameInstanceId,
+}: {
+  view: SeatView
+  roleLabel: string
+  participantId: string
+  gameInstanceId: string
+}) {
+  const myTotal = view.history.reduce((sum, h) =>
+    sum + (view.role === 'buyer' ? h.profits.buyer : view.role === 'seller1' ? h.profits.seller1 : h.profits.seller2), 0)
+
+  // null = still resolving the debrief config; [] = none configured; [...] = configured.
+  const [debriefQs, setDebriefQs] = useState<DebriefQuestion[] | null>(null)
+  const [submitted, setSubmitted] = useState(false)
+  const [showDebrief, setShowDebrief] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      // Resume-safe: a student who already submitted the debrief lands straight on the
+      // terminal results, never back on a Continue button.
+      let already = false
+      try {
+        const snap = await getDoc(doc(db, 'game_instances', gameInstanceId, 'participants', participantId))
+        already = snap.exists() && (snap.data() ?? {}).debrief_submitted_at != null
+      } catch { /* best-effort; treat as not-yet-submitted */ }
+      let qs: DebriefQuestion[] = []
+      try {
+        const r = await getDebriefQuestions()
+        // Likert "looking ahead" items (if any game authors them) are not free-text — exclude.
+        qs = (r.questions as DebriefQuestion[]).filter(q => q.type !== 'likert')
+      } catch { /* no debrief configured → empty */ }
+      if (cancelled) return
+      setSubmitted(already)
+      setDebriefQs(qs)
+    })()
+    return () => { cancelled = true }
+  }, [gameInstanceId, participantId])
+
+  // The debrief question screen replaces the results while the student answers.
+  if (showDebrief && !submitted && debriefQs && debriefQs.length > 0) {
+    return (
+      <DebriefScreen
+        questions={debriefQs}
+        participantId={participantId}
+        gameInstanceId={gameInstanceId}
+        onCancel={() => setShowDebrief(false)}
+        onSubmitted={() => { setSubmitted(true); setShowDebrief(false) }}
+      />
+    )
+  }
+
+  // Terminal ⇔ nothing more to do: no debrief configured, or the debrief is already done.
+  const terminal = debriefQs !== null && (submitted || debriefQs.length === 0)
+  const canContinue = debriefQs !== null && !submitted && debriefQs.length > 0
+
+  return (
+    <main style={page} data-testid="crisis-finished">
+      <h1 style={{ marginTop: 0 }}>Game complete</h1>
+      <p>You played as <strong>{roleLabel}</strong>. Your total profit across all {view.numRounds} rounds
+        was <strong data-testid="crisis-total-profit">{myTotal.toLocaleString('en-US')}</strong>.</p>
+      <p style={{ color: colors.textSecondary }}>Profit is the object of the debrief — it is not graded.</p>
+      <h2 style={{ fontSize: '1.1rem' }}>Full history</h2>
+      <HistoryTable history={view.history} viewerRole={view.role} />
+
+      {canContinue && (
+        <div style={{ marginTop: spacing.gapLg }}>
+          <p style={{ color: colors.textSecondary }}>One last step — a short reflection before you finish.</p>
+          <button data-testid="crisis-continue-debrief" style={primaryBtn} onClick={() => setShowDebrief(true)}>
+            Continue
+          </button>
+        </div>
+      )}
+      {terminal && (
+        <p data-testid="crisis-done-closure" style={{ marginTop: spacing.gapLg, fontWeight: 700 }}>
+          You&apos;re done — you can close your window.
+        </p>
+      )}
+    </main>
+  )
+}
+
+/** The configured free-text debrief. Submits by writing the answers + a timestamp directly
+ *  to the participant doc (rules-permitted), then returns to the terminal results view. */
+function DebriefScreen({
+  questions, participantId, gameInstanceId, onSubmitted, onCancel,
+}: {
+  questions: DebriefQuestion[]
+  participantId: string
+  gameInstanceId: string
+  onSubmitted: () => void
+  onCancel: () => void
+}) {
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const allAnswered = questions.every(q => (answers[q.field] ?? '').trim() !== '')
+
+  const submit = async () => {
+    if (!allAnswered) { setError('Please answer each question before submitting.'); return }
+    setSaving(true); setError(null)
+    try {
+      const updates: Record<string, unknown> = { debrief_submitted_at: serverTimestamp() }
+      for (const q of questions) {
+        const v = (answers[q.field] ?? '').trim()
+        if (v) updates[q.field] = v
+      }
+      await updateDoc(doc(db, 'game_instances', gameInstanceId, 'participants', participantId), updates)
+      onSubmitted()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save. Please try again.')
+      setSaving(false)
+    }
+  }
+
+  const textarea: React.CSSProperties = {
+    width: '100%', marginTop: spacing.gapSm, padding: spacing.gapSm, fontSize: '1rem',
+    border: `1px solid ${colors.borderLight}`, borderRadius: 4, resize: 'vertical',
+    fontFamily: 'inherit', boxSizing: 'border-box',
+  }
+  return (
+    <main style={page} data-testid="crisis-debrief">
+      <h1 style={{ marginTop: 0 }}>Before you go — a short reflection</h1>
+      <p style={{ color: colors.textSecondary }}>Your responses are not graded.</p>
+      {questions.map(q => (
+        <div key={q.field} style={{ marginTop: spacing.gapMd }}>
+          <label style={{ fontWeight: 600, display: 'block' }}>{q.prompt}</label>
+          <textarea
+            data-testid={`crisis-debrief-input-${q.field}`}
+            rows={4}
+            value={answers[q.field] ?? ''}
+            placeholder={q.placeholder ?? ''}
+            onChange={e => setAnswers(prev => ({ ...prev, [q.field]: e.target.value }))}
+            disabled={saving}
+            style={textarea}
+          />
+        </div>
+      ))}
+      {error && <p data-testid="crisis-debrief-error" role="alert" style={{ color: '#b91c1c', marginTop: spacing.gapSm }}>{error}</p>}
+      <div style={{ marginTop: spacing.gapLg, display: 'flex', gap: spacing.gapBtn, alignItems: 'center' }}>
+        <button data-testid="crisis-debrief-submit" style={primaryBtn} disabled={saving || !allAnswered} onClick={() => void submit()}>
+          {saving ? 'Submitting…' : 'Submit'}
+        </button>
+        <button data-testid="crisis-debrief-back" onClick={onCancel} disabled={saving}
+          style={{ padding: '0.5rem 1.1rem', fontSize: '1rem', cursor: 'pointer', background: 'none', color: colors.textSecondary, border: `1px solid ${colors.borderLight}`, borderRadius: 4 }}>
+          Back
+        </button>
+      </div>
+    </main>
   )
 }

@@ -185,6 +185,66 @@ async function bringUp() {
 }
 function tearDown() { if (process.env.KEEP === '1') return; for (const c of children) { try { process.kill(-c.pid, 'SIGKILL') } catch { /* */ } } freePorts() }
 
+// ── Part 1/2 helpers (round-summary box + end-screen debrief) ─────────────────────
+async function irv(gid) { return (await callFn('getInstructorRoundView', { _dev: { game_instance_id: gid }, group_id: 'g' })).result }
+/** Play round 1 fully via callables (no crisis → fixing auto-skipped). Returns the role map. */
+async function playRound1(gid, seed, { bid1 = 15, bid2 = 15, a1, a2, fix1 = true, fix2 = true }) {
+  await seedGroup(gid); await open(gid, seed)
+  const rm = roleMapFrom(await irv(gid))
+  await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: bid1 })
+  await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', bid: bid2 })
+  await callFn('submitAllocation', { _test: { participant_id: rm.buyer, game_instance_id: gid }, group_id: 'g', a1, a2 })
+  const v = await irv(gid)
+  if (v.stage === 'fixing') {
+    if (a1 > 0) await callFn('submitFix', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', fixed: fix1 })
+    if (a2 > 0) await callFn('submitFix', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', fixed: fix2 })
+  }
+  return rm
+}
+/** Seed ONE free-text debrief question into config/main (owner write bypasses rules). */
+async function seedDebriefQuestion(gid) {
+  const q = { mapValue: { fields: {
+    field:       { stringValue: 'debrief_takeaway' },
+    prompt:      { stringValue: 'What is your main takeaway from this game?' },
+    placeholder: { stringValue: '' },
+    order:       { integerValue: '1' },
+    hidden:      { booleanValue: false },
+    deletable:   { booleanValue: true },
+    type:        { stringValue: 'text' },
+    category:    { stringValue: 'debrief' },
+    role_target: { stringValue: 'all' },
+    system:      { booleanValue: false },
+  } } }
+  await fetch(`${FIRESTORE}/game_instances/${gid}/config/main`, {
+    method: 'PATCH', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { prep_text_questions: { arrayValue: { values: [q] } } } }),
+  })
+}
+async function readParticipant(gid, pid) {
+  const r = await fetch(`${FIRESTORE}/game_instances/${gid}/participants/${pid}`, { headers: { Authorization: 'Bearer owner' } })
+  const b = await r.json().catch(() => ({})); return b.fields ?? {}
+}
+const norm1 = s => (s ?? '').replace(/\s+/g, ' ').trim()
+/** Every box figure (all three cards) appears in the history table's row for `round`; the
+ *  Buyer profit is checked EXACTLY against the table's own buyer-profit cell. */
+async function boxParity(page, round) {
+  const rowText = norm1(await page.textContent(`[data-testid="crisis-history-row-${round}"]`).catch(() => ''))
+  const misses = []
+  for (const id of [
+    'crisis-summary-bid-seller1', 'crisis-summary-alloc-seller1', 'crisis-summary-fix-seller1', 'crisis-summary-profit-seller1',
+    'crisis-summary-bid-seller2', 'crisis-summary-alloc-seller2', 'crisis-summary-fix-seller2', 'crisis-summary-profit-seller2',
+    'crisis-summary-profit-buyer',
+  ]) {
+    const t = norm1(await page.textContent(`[data-testid="${id}"]`).catch(() => ''))
+    if (!rowText.includes(t)) misses.push(`${id}=${t}`)
+  }
+  const boxBuyer = norm1(await page.textContent('[data-testid="crisis-summary-profit-buyer"]').catch(() => ''))
+  const cellBuyer = norm1(await page.textContent(`[data-testid="crisis-buyer-profit-${round}"]`).catch(() => ''))
+  return { ok: misses.length === 0 && boxBuyer === cellBuyer, misses, boxBuyer, cellBuyer }
+}
+/** A future clock reading to force the current stage's deadline to expire on demand. */
+const FUTURE_MS = 10_000_000_000_000
+
 // ── the suite ───────────────────────────────────────────────────────────────────
 async function main() {
   await bringUp()
@@ -1153,6 +1213,186 @@ async function main() {
     await page.waitForSelector('[data-testid="crisis-mode-readout"], [data-testid="crisis-back-to-dashboard"]', { timeout: 45000 })
     check(await persistedUid(page) === `instructor_${gidB}`, '(19) reloading the SAME instance keeps the matching session')
     await ctx.close()
+  }
+
+  // (20) PART 1 — between-rounds "round just completed" summary box (Option B)
+  banner('(20) round-summary box — gating, per-seat parity, crisis sentence, defaulted round')
+  {
+    const crisisSeed   = await seedForCrisis(true)
+    const noCrisisSeed = await seedForCrisis(false)
+
+    // ── (20a) gating: NO box before round 1 (no resolved round yet) ──────────────
+    {
+      const gid = 'box-r1'; await seedGroup(gid); await open(gid, crisisSeed)
+      const rm = roleMapFrom(await irv(gid))
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-waiting"]', { timeout: 15000 }).catch(() => {})
+      check(!(await testidPresent(bp, 'crisis-round-summary')), '(20a) no box before round 1 (buyer waiting, empty history)')
+      await bp.close()
+    }
+
+    // ── (20b) crisis SPLIT — buyer view: box present, sentence, own-card highlight, parity ──
+    {
+      const gid = 'box-split'
+      const rm = await playRound1(gid, crisisSeed, { bid1: 15, bid2: 16, a1: 60, a2: 40, fix1: true, fix2: false })
+      check((await irv(gid)).round === 2, '(20b) round 1 resolved, round 2 open')
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-round-summary"]', { timeout: 15000 }).catch(() => {})
+      check(await testidPresent(bp, 'crisis-round-summary'), '(20b) box renders on the buyer\'s between-rounds waiting screen')
+      const sentence = norm1(await bp.textContent('[data-testid="crisis-summary-sentence"]').catch(() => ''))
+      check(sentence === 'A crisis hit — Seller 1 fixed it for their units; Seller 2 did not.', `(20b) SPLIT crisis sentence [${sentence}]`)
+      const buyerCard = await bp.textContent('[data-testid="crisis-summary-card-buyer"]')
+      const s1Card    = await bp.textContent('[data-testid="crisis-summary-card-seller1"]')
+      check(/\(you\)/.test(buyerCard) && !/\(you\)/.test(s1Card), '(20b) buyer\'s own card is the highlighted one')
+      const par = await boxParity(bp, 1)
+      check(par.ok, `(20b) every box figure matches the table row-1 (buyer profit box=${par.boxBuyer} cell=${par.cellBuyer}${par.misses.length ? ' misses=' + par.misses.join(',') : ''})`)
+      await bp.close()
+
+      // seller1 perspective: on the waiting screen (after bidding round 2), own card highlighted + parity
+      const sp = await gotoSeat(ctx, gid, rm.seller1)
+      // seller owes a round-2 bid → act once so it lands on the between-rounds waiting screen
+      const st = await stateOf(sp)
+      if (st?.owes === 'bid') { await sp.fill('[data-testid="crisis-bid-input"]', '15'); await sp.click('[data-testid="crisis-submit"]') }
+      await sp.waitForSelector('[data-testid="crisis-round-summary"]', { timeout: 15000 }).catch(() => {})
+      check(await testidPresent(sp, 'crisis-round-summary'), '(20b) box also renders for a Seller once they\'re waiting between rounds')
+      const s1Own  = await sp.textContent('[data-testid="crisis-summary-card-seller1"]')
+      const s2Other = await sp.textContent('[data-testid="crisis-summary-card-seller2"]')
+      check(/\(you\)/.test(s1Own) && !/\(you\)/.test(s2Other), '(20b) Seller 1\'s own card is the highlighted one')
+      check((await boxParity(sp, 1)).ok, '(20b) Seller 1\'s box figures match the table row-1')
+      await sp.close()
+    }
+
+    // ── (20c) sentence variants ──────────────────────────────────────────────────
+    const sentenceCase = async (label, seed, opts, want) => {
+      const gid = `box-${label}`
+      const rm = await playRound1(gid, seed, opts)
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-summary-sentence"]', { timeout: 15000 }).catch(() => {})
+      const got = norm1(await bp.textContent('[data-testid="crisis-summary-sentence"]').catch(() => ''))
+      check(got === want, `(20c) ${label}: [${got}]`)
+      await bp.close()
+    }
+    await sentenceCase('both',   crisisSeed,   { a1: 60, a2: 40, fix1: true,  fix2: true  }, 'A crisis hit — both Sellers fixed it.')
+    await sentenceCase('none',   crisisSeed,   { a1: 60, a2: 40, fix1: false, fix2: false }, 'A crisis hit — neither Seller fixed it.')
+    await sentenceCase('zero',   crisisSeed,   { a1: 100, a2: 0, fix1: true,  fix2: true  }, 'A crisis hit — Seller 1 fixed it for their units; Seller 2 had no units this round.')
+    await sentenceCase('nocris', noCrisisSeed, { a1: 60, a2: 40 },                            'No crisis this round.')
+
+    // ── (20d) 0-alloc seat: card matches the table (Fix?="No"), banner carries the honesty ──
+    {
+      const gid = 'box-zero-parity'
+      const rm = await playRound1(gid, crisisSeed, { a1: 100, a2: 0, fix1: true, fix2: true })
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-round-summary"]', { timeout: 15000 }).catch(() => {})
+      const s2Fix   = norm1(await bp.textContent('[data-testid="crisis-summary-fix-seller2"]').catch(() => ''))
+      const s2Alloc = norm1(await bp.textContent('[data-testid="crisis-summary-alloc-seller2"]').catch(() => ''))
+      check(s2Alloc === '0' && s2Fix === 'No', `(20d) 0-unit Seller card matches the table (alloc=${s2Alloc} fix=${s2Fix})`)
+      check((await boxParity(bp, 1)).ok, '(20d) 0-alloc round box figures still match the table row-1')
+      await bp.close()
+    }
+
+    // ── (20e) gating: NO box on a MID-ROUND (allocation-stage) wait ──────────────
+    {
+      const gid = 'box-midround'
+      const rm = await playRound1(gid, noCrisisSeed, { a1: 60, a2: 40 })  // round 2 now open (bidding)
+      // both sellers bid round 2 → stage advances to allocation; a Seller now waits mid-round
+      await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: 15 })
+      await callFn('submitBid', { _test: { participant_id: rm.seller2, game_instance_id: gid }, group_id: 'g', bid: 15 })
+      check((await irv(gid)).stage === 'allocation', '(20e) round 2 reached the allocation stage')
+      const sp = await gotoSeat(ctx, gid, rm.seller1)
+      await sp.waitForSelector('[data-testid="crisis-waiting"]', { timeout: 15000 }).catch(() => {})
+      check(!(await testidPresent(sp, 'crisis-round-summary')), '(20e) no box on a mid-round (allocation) wait')
+      await sp.close()
+    }
+
+    // ── (20f) a DEFAULTED (timed-out) round renders correctly ────────────────────
+    {
+      const gid = 'box-default'; await seedGroup(gid); await open(gid, noCrisisSeed)
+      const rm = roleMapFrom(await irv(gid))
+      await callFn('submitBid', { _test: { participant_id: rm.seller1, game_instance_id: gid }, group_id: 'g', bid: 15 })
+      // seller2 never bids → force the bidding deadline to expire → seller2 defaults
+      await callFn('checkRoundClock', { _dev: { game_instance_id: gid, now_ms: FUTURE_MS }, group_id: 'g' })
+      await callFn('submitAllocation', { _test: { participant_id: rm.buyer, game_instance_id: gid }, group_id: 'g', a1: 60, a2: 40 })
+      const v = await irv(gid)
+      check(v.round === 2 && v.history[0].defaulted.s2 === true, '(20f) round 1 resolved with Seller 2 defaulted')
+      const bp = await gotoSeat(ctx, gid, rm.buyer)
+      await bp.waitForSelector('[data-testid="crisis-round-summary"]', { timeout: 15000 }).catch(() => {})
+      check(await testidPresent(bp, 'crisis-round-summary'), '(20f) box renders for a defaulted round')
+      check((await boxParity(bp, 1)).ok, '(20f) defaulted round\'s box figures (incl. the substituted bid) match the table row-1')
+      await bp.close()
+    }
+  }
+
+  // (21) PART 2 — end screen: terminal closure + config-driven debrief continuation
+  banner('(21) end screen — terminal closure, debrief Continue→submit→terminal, all 3 roles')
+  {
+    // ── (21a) NO debrief configured (the live default) → terminal WITH closure, no Continue ──
+    {
+      const gid = 'end-nodebrief'; await seedGroup(gid); await open(gid, 1)
+      const pages = []
+      for (const pid of PIDS) pages.push({ pid, page: await gotoSeat(ctx, gid, pid) })
+      const plan = { bid: () => 15, alloc: () => [60, 40], fix: () => true }
+      check(await driveToFinish(pages, plan), '(21a) game played to finish')
+      for (const { page } of pages) {
+        await page.waitForSelector('[data-testid="crisis-done-closure"]', { timeout: 15000 }).catch(() => {})
+        const st = await stateOf(page)
+        const role = st.role
+        const expected = st.history.reduce((s, h) => s + (role === 'buyer' ? h.profits.buyer : role === 'seller1' ? h.profits.seller1 : h.profits.seller2), 0)
+        check(await testidPresent(page, 'crisis-finished'), `(21a) ${role}: finished screen present`)
+        check(await testidPresent(page, 'crisis-done-closure'), `(21a) ${role}: closure line present (terminal)`)
+        check(!(await testidPresent(page, 'crisis-continue-debrief')), `(21a) ${role}: NO Continue button (nothing more to do)`)
+        check(!(await testidPresent(page, 'crisis-round-summary')), `(21a) ${role}: NO summary box on the finished screen`)
+        const shown = norm1(await page.textContent('[data-testid="crisis-total-profit"]'))
+        check(shown === expected.toLocaleString('en-US'), `(21a) ${role}: total profit ${shown} == sum of history ${expected}`)
+      }
+      for (const p of pages) await p.page.close()
+    }
+
+    // ── (21b) debrief CONFIGURED → Continue → debrief → submit → terminal, for all 3 roles ──
+    {
+      const gid = 'end-debrief'; await seedGroup(gid); await seedDebriefQuestion(gid); await open(gid, 1)
+      const pages = []
+      for (const pid of PIDS) pages.push({ pid, page: await gotoSeat(ctx, gid, pid) })
+      const plan = { bid: () => 15, alloc: () => [60, 40], fix: () => true }
+      check(await driveToFinish(pages, plan), '(21b) game played to finish (debrief configured)')
+
+      for (const { pid, page } of pages) {
+        const role = (await stateOf(page)).role
+        await page.waitForSelector('[data-testid="crisis-continue-debrief"]', { timeout: 15000 }).catch(() => {})
+        check(await testidPresent(page, 'crisis-continue-debrief'), `(21b) ${role}: Continue button present`)
+        check(!(await testidPresent(page, 'crisis-done-closure')), `(21b) ${role}: no closure line yet (not terminal)`)
+        // Continue → debrief screen
+        await page.click('[data-testid="crisis-continue-debrief"]')
+        await page.waitForSelector('[data-testid="crisis-debrief"]', { timeout: 10000 }).catch(() => {})
+        check(await testidPresent(page, 'crisis-debrief'), `(21b) ${role}: debrief screen renders`)
+        // submit disabled until answered
+        const disabledBefore = await page.getAttribute('[data-testid="crisis-debrief-submit"]', 'disabled')
+        check(disabledBefore !== null, `(21b) ${role}: Submit disabled before answering`)
+        await page.fill('[data-testid="crisis-debrief-input-debrief_takeaway"]', `Reflection from ${role}.`)
+        await page.click('[data-testid="crisis-debrief-submit"]')
+        // → terminal results (same view + closure), NOT a bare confirmation. The direct
+        // participant-doc write can be slow under emulator load for the last-processed seat,
+        // so wait generously for the terminal state (the write, then the re-render).
+        await page.waitForSelector('[data-testid="crisis-done-closure"]', { timeout: 30000 }).catch(() => {})
+        check(await testidPresent(page, 'crisis-finished'), `(21b) ${role}: lands back on the results view`)
+        check(await testidPresent(page, 'crisis-done-closure'), `(21b) ${role}: closure line present (terminal)`)
+        check(!(await testidPresent(page, 'crisis-continue-debrief')), `(21b) ${role}: Continue gone after submit`)
+        check(await testidPresent(page, 'crisis-total-profit'), `(21b) ${role}: total profit still shown`)
+        const label = role === 'buyer' ? 'You (Buyer)' : role === 'seller1' ? 'You (Seller 1)' : 'You (Seller 2)'
+        check((await page.textContent('[data-testid="crisis-history"]')).includes(label), `(21b) ${role}: own history block highlighted (${label})`)
+        const fields = await readParticipant(gid, pid)
+        check(fields.debrief_submitted_at != null && fields.debrief_takeaway?.stringValue === `Reflection from ${role}.`,
+          `(21b) ${role}: debrief answer + timestamp persisted to the participant doc`)
+      }
+
+      // ── (21c) resume-safe: reload after submitting lands straight on terminal (no Continue) ──
+      const rp = pages[0].page
+      await rp.reload()
+      await rp.waitForSelector('[data-testid="crisis-done-closure"]', { timeout: 15000 }).catch(() => {})
+      check(await testidPresent(rp, 'crisis-done-closure') && !(await testidPresent(rp, 'crisis-continue-debrief')),
+        '(21c) a resumed already-submitted student lands on terminal results, never back on Continue')
+
+      for (const p of pages) await p.page.close()
+    }
   }
 
   await browser.close()
