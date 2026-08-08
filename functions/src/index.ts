@@ -23,6 +23,7 @@ import {
   makeGetInfoUrls,
 } from '@mygames/game-server'
 import { crisisGameDef } from './gameDefinition'
+import { buildStamp } from './buildInfo'
 
 admin.initializeApp()
 
@@ -105,7 +106,7 @@ export const health = onRequest((req, res) => {
     res.set('Vary', 'Origin')
   }
   if (req.method === 'OPTIONS') { res.status(204).send(''); return }
-  res.json({ ok: true, game: 'crisis' })
+  res.json({ ok: true, game: 'crisis', build: buildStamp() })
 })
 
 // Emulator-only dev seeds (LOCKED — 404 unless FUNCTIONS_EMULATOR==='true').

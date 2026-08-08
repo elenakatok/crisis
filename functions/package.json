@@ -2,6 +2,7 @@
   "name": "crisis-functions",
   "private": true,
   "scripts": {
+    "prebuild": "node scripts/gen-build-info.mjs",
     "build": "tsc",
     "build:watch": "tsc --watch",
     "test": "vitest run",
