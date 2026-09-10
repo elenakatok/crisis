@@ -18,6 +18,7 @@ import {
 import type { BootstrapArgs, InfoPageLink } from '@mygames/game-ui'
 import CrisisGame from '../game/CrisisGame'
 import OnlineGroupReveal from '../game/OnlineGroupReveal'
+import OnlineHolding from '../game/OnlineHolding'
 
 // ── Phase state ───────────────────────────────────────────────────────────────
 //
@@ -181,14 +182,19 @@ export default function Play() {
     return () => { cancelled = true }
   }, [session])
 
-  // Online-only: re-resolve the underlying phase after prep completes (online skips
-  // hold/confirmation, so prep-done → straight into the game). Classroom keeps its own
-  // onComplete → 'hold' path untouched.
+  // Online-only: re-resolve the underlying phase. Two callers: prep completing (online skips
+  // hold/confirmation, so prep-done → straight into the game) and the live holding screen
+  // seeing group_id appear. Classroom keeps its own onComplete → 'hold' path untouched.
+  // ⚠ It APPLIES THE REVEAL GATE, exactly as session start does. It used to set the phase
+  // alone — harmless while its only caller ran after the login reveal, but a student leaving
+  // holding has never seen a reveal, and setting the phase alone drops them straight into the
+  // game. revealDismissed keeps a reveal the student already continued past from reappearing.
   const rerouteOnline = useCallback(async () => {
     if (session.kind !== 'ready') return
     try {
       const res = await routeToPhase(session.participantId, session.gameInstanceId, 'off')
       setPhase(res.phase)
+      setRevealGroupId(res.revealGroupId && !revealDismissed.current ? res.revealGroupId : null)
     } catch { /* leave the current phase in place */ }
   }, [session])
 
@@ -281,14 +287,14 @@ export default function Play() {
     <div style={{ fontFamily: typography.fontFamily }}>
       <GameHeader studentLinks={headerLinks} />
 
+      {/* LIVE: subscribes to group_id and re-routes through rerouteOnline, which applies the
+          reveal gate. Not WaitingRoom — game/OnlineHolding.tsx says why. */}
       {phase.name === 'online_holding' && (
-        <main style={{ padding: layout.pagePad, maxWidth: layout.contentWidth, margin: '0 auto' }}>
-          <h1 style={{ marginTop: 0 }}>Not in a group yet</h1>
-          <p data-testid="crisis-online-holding" style={{ lineHeight: 1.6, color: colors.textSecondary }}>
-            You are not currently assigned to a group. Check back soon — this page will show your
-            group as soon as your instructor forms or updates the groups.
-          </p>
-        </main>
+        <OnlineHolding
+          participantId={participantId}
+          gameInstanceId={gameInstanceId}
+          onGrouped={rerouteOnline}
+        />
       )}
 
       {phase.name === 'info' && (
