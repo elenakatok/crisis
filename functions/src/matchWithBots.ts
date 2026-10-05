@@ -71,11 +71,11 @@ async function fillRemainderCore(gameInstanceId: string) {
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
 
   try {
-    const [presenceSnap, participantsSnap] = await Promise.all([
-      admin.database().ref(`presence/${gameInstanceId}`).once('value'),
-      instanceRef.collection('participants').get(),
-    ])
-    const presentIds = new Set<string>(Object.keys((presenceSnap.val() ?? {}) as object))
+    // ELIGIBLE = entered the attendance code (Elena, 2026-10-05: "entered the code = matched").
+    // A live RTDB connection is NOT required — the same rule the shared matcher applies
+    // from game-server 0.30.0. A phone mid-reload at the click must not cost a student
+    // their seat, and here it would also have put a robot in it.
+    const participantsSnap = await instanceRef.collection('participants').get()
 
     const ungroupedHumans = participantsSnap.docs
       .filter((doc) => {
@@ -84,7 +84,6 @@ async function fillRemainderCore(gameInstanceId: string) {
           d['is_bot'] !== true &&
           d['attendance_confirmed_at'] != null &&
           d['role'] === 'player' &&
-          presentIds.has(doc.id) &&
           d['group_id'] == null
         )
       })
@@ -163,6 +162,34 @@ export const triggerMatching = onCall({ cors: crisisGameDef.corsOrigins }, async
   const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true'
   const authHeader = request.rawRequest.headers.authorization as string | undefined
   const gameInstanceId = await extractInstructorGameId(data, isEmulator, authHeader)
+
+  // ── Flags the shared dashboard may send (game-server ≥ 0.30.0) ─────────────────────
+  // RE-MATCH is refused here: the shared re-match discards groups, and this game's last
+  // group holds robots whose participant rows it knows nothing about.
+  if (data['rematch'] === true) {
+    throw new HttpsError('failed-precondition', 'Re-match is not available in this game: the last group is completed with robots.')
+  }
+  // PREVIEW must write NOTHING. Without this branch the human matcher would return its
+  // preview and the robot-fill below would then run for real, on every student.
+  if (data['preview'] === true) {
+    const res = (await humanMatcher.run(request)) as {
+      preview?: { confirmed: number; extras_by_role: Record<string, number>; feasible: boolean }
+    } & Record<string, unknown>
+    if (!res.preview) return res // already matched → the existing groups, as before
+    const left = Object.values(res.preview.extras_by_role).reduce((a, b) => a + b, 0)
+    const robots = GROUP_SIZE - left
+    return {
+      ...res,
+      preview: {
+        ...res.preview,
+        // One student is enough here: robots complete the group.
+        feasible: res.preview.confirmed > 0,
+        extras_note: left === 0
+          ? null
+          : `${left} student${left === 1 ? '' : 's'} left over will form one more group, completed with ${robots} robot${robots === 1 ? '' : 's'}.`,
+      },
+    }
+  }
 
   // 1. Human groups — EXACTLY today's path (the shared matcher's own handler, in-process).
   let human: unknown
